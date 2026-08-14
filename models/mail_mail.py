@@ -23,11 +23,13 @@ class MailMail(models.Model):
         return bool(self.env.context.get("rate_limit_bypass"))
 
     def _rate_limit_prepare_batch(self, mail_server, batch_ids):
-        """Reserve one-minute sending quota for a batch.
+        """Reserve the current one-minute window for a batch.
 
-        The quota belongs to the outgoing server, so every background sender
-        using that server shares the same counter. A PostgreSQL row lock makes
-        the reservation atomic across Odoo workers.
+        The outgoing server owns the quota, so all mail paths using that server
+        share it. Only the current window is reserved here. Anything that does
+        not fit is deferred to the next minute; it is intentionally not counted
+        in advance, so concurrent workers cannot accidentally double-reserve a
+        future window.
         """
         if (
             not mail_server
@@ -53,15 +55,13 @@ class MailMail(models.Model):
         row = self.env.cr.fetchone()
         stored_window = fields.Datetime.to_datetime(row[0]) if row and row[0] else False
         current_count = int(row[1] or 0) if row else 0
-
         if stored_window != current_window:
             current_count = 0
 
         limit = mail_server.rate_limit_per_minute
         allowed = self.browse()
         delayed = self.browse()
-        future_window = current_window
-        future_count = current_count
+        next_window = current_window + datetime.timedelta(minutes=1)
 
         for mail in mails.sorted(lambda record: (record.create_date, record.id)):
             if current_count < limit:
@@ -71,17 +71,12 @@ class MailMail(models.Model):
                     "rate_limit_server_id": mail_server.id,
                     "scheduled_date": False,
                 })
-                continue
-
-            delayed |= mail
-            if future_count >= limit:
-                future_window += datetime.timedelta(minutes=1)
-                future_count = 0
-            mail.write({
-                "rate_limit_server_id": mail_server.id,
-                "scheduled_date": future_window,
-            })
-            future_count += 1
+            else:
+                delayed |= mail
+                mail.write({
+                    "rate_limit_server_id": mail_server.id,
+                    "scheduled_date": next_window,
+                })
 
         mail_server.sudo().write({
             "rate_limit_window": current_window,
@@ -93,15 +88,13 @@ class MailMail(models.Model):
                 "mail.ir_cron_mail_scheduler_action", raise_if_not_found=False
             )
             if cron:
-                cron._trigger(
-                    min(delayed.mapped("scheduled_date"))
-                    + datetime.timedelta(seconds=1)
-                )
+                cron._trigger(next_window + datetime.timedelta(seconds=1))
             _logger.info(
-                "Email rate limit: server %s allowed %s and delayed %s mail(s)",
+                "Email rate limit: server %s allowed %s and deferred %s mail(s) to %s",
                 mail_server.display_name,
                 len(allowed),
                 len(delayed),
+                next_window,
             )
 
         return allowed
@@ -186,7 +179,8 @@ class MailMail(models.Model):
             len(exhausted),
             fallback.display_name,
         )
-        # Do not bypass the fallback server's own rate limit.
+        # The fallback send still passes through the fallback server's own
+        # limiter. This context only prevents recursive fallback.
         exhausted.with_context(rate_limit_no_fallback=True).send()
 
     def send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
