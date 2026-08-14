@@ -1,4 +1,5 @@
 from odoo import api, fields, models
+from odoo.exceptions import ValidationError
 
 
 class IrMailServer(models.Model):
@@ -14,16 +15,8 @@ class IrMailServer(models.Model):
         default=50,
         help="Maximum mail.mail records reserved for this server in one UTC minute.",
     )
-    rate_limit_window = fields.Datetime(
-        string="Rate Limit Window",
-        readonly=True,
-        copy=False,
-    )
-    rate_limit_count = fields.Integer(
-        string="Rate Limit Count",
-        readonly=True,
-        copy=False,
-    )
+    rate_limit_window = fields.Datetime(string="Rate Limit Window", readonly=True, copy=False)
+    rate_limit_count = fields.Integer(string="Rate Limit Count", readonly=True, copy=False)
     fallback_enabled = fields.Boolean(
         string="Enable Fallback",
         default=False,
@@ -50,43 +43,16 @@ class IrMailServer(models.Model):
     def _check_rate_limit_values(self):
         for server in self:
             if server.rate_limit_per_minute < 1:
-                raise ValueError("Emails / Minute must be at least 1.")
+                raise ValidationError("Emails / Minute must be at least 1.")
             if server.fallback_max_retries < 0:
-                raise ValueError("Primary Rate-Limit Retries cannot be negative.")
+                raise ValidationError("Primary Rate-Limit Retries cannot be negative.")
             if server.fallback_retry_delay < 1:
-                raise ValueError("Retry Delay must be at least 1 second.")
+                raise ValidationError("Retry Delay must be at least 1 second.")
 
-    def _rate_limit_reserve(self, amount=1):
-        """Atomically reserve quota for this server.
-
-        A row lock makes the quota shared across Odoo workers/processes.
-        Reservation happens before SMTP connection/send, so concurrent workers
-        cannot independently consume the same quota.
-        """
-        self.ensure_one()
-        if not self.rate_limit_enabled:
-            return True
-
-        now = fields.Datetime.now()
-        window = now.replace(second=0, microsecond=0)
-        self.env.cr.execute(
-            "SELECT rate_limit_window, rate_limit_count "
-            "FROM ir_mail_server WHERE id = %s FOR UPDATE",
-            [self.id],
-        )
-        row = self.env.cr.fetchone()
-        current_window = fields.Datetime.to_datetime(row[0]) if row and row[0] else None
-        current_count = row[1] if row else 0
-
-        if current_window != window:
-            current_count = 0
-            current_window = window
-
-        if current_count + amount > self.rate_limit_per_minute:
-            return False
-
-        self.sudo().write({
-            "rate_limit_window": current_window,
-            "rate_limit_count": current_count + amount,
-        })
-        return True
+    @api.constrains("fallback_enabled", "fallback_server_id")
+    def _check_fallback_server(self):
+        for server in self:
+            if server.fallback_enabled and not server.fallback_server_id:
+                raise ValidationError("A fallback server is required when fallback is enabled.")
+            if server.fallback_server_id == server:
+                raise ValidationError("The fallback server must be different from the primary server.")
