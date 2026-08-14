@@ -4,12 +4,12 @@ from odoo import models
 class MailMail(models.Model):
     _inherit = "mail.mail"
 
-    def _rate_limit_server_groups(self):
-        """Split the current send into allowed and deferred records.
+    def _rate_limit_send(self):
+        """Return the background mails allowed by the shared server quota.
 
-        The gate is deliberately placed on mail.mail.send() so Odoo's native
-        mass queue and the custom instant queue share exactly the same
-        outgoing-server quota.
+        This is intentionally not wired into ``send()``. The Email form's
+        manual Send Now path must remain completely outside this module's
+        limiter. Background queue callers explicitly use this method.
         """
         allowed = self.browse()
         delayed = self.browse()
@@ -22,18 +22,24 @@ class MailMail(models.Model):
                 allowed |= batch
                 continue
 
-            ok, next_at = state_model.reserve(server, len(batch))
-            if ok:
-                allowed |= batch
-            else:
-                batch.write({"scheduled_date": next_at})
-                delayed |= batch
+            allowed_count, next_at = state_model.reserve(server, len(batch))
+            allowed_batch = batch[:allowed_count]
+            delayed_batch = batch[allowed_count:]
+            allowed |= allowed_batch
+
+            if delayed_batch:
+                delayed_batch.write({"scheduled_date": next_at})
+                delayed |= delayed_batch
 
         return allowed, delayed
 
-    def send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
-        """Apply the shared outgoing-server rate gate, then use Odoo's sender."""
-        allowed, _delayed = self._rate_limit_server_groups()
+    def _send_background(self, auto_commit=False, raise_exception=False, post_send_callback=None):
+        """Send background mail through the shared rate limiter.
+
+        Manual ``mail.mail.send()`` is deliberately untouched, so Send Now
+        from the Email form bypasses the limiter.
+        """
+        allowed, _delayed = self._rate_limit_send()
         if not allowed:
             return True
         return super(MailMail, allowed).send(
