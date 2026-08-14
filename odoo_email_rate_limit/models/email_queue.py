@@ -29,13 +29,15 @@ class EmailRateLimitState(models.Model):
         window_start = datetime.fromtimestamp(start_seconds, tz=timezone.utc).replace(tzinfo=None)
         table = self._table
 
-        # Serialize all quota updates for a server. This is required when Odoo
-        # has multiple workers/cron processes sending through the same server.
+        # Create the single state row if needed. Do not name an ON CONFLICT
+        # target here: this keeps the SQL valid even on databases where the
+        # model constraint has not been materialized yet (e.g. during module
+        # upgrades). The subsequent SELECT ... FOR UPDATE serializes access.
         self.env.cr.execute(
             f"""
             INSERT INTO {table} (mail_server_id, window_start, sent_count, create_uid, create_date, write_uid, write_date)
             VALUES (%s, %s, 0, %s, NOW(), %s, NOW())
-            ON CONFLICT (mail_server_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             """,
             (server.id, window_start, self.env.uid, self.env.uid),
         )
@@ -44,6 +46,8 @@ class EmailRateLimitState(models.Model):
             (server.id,),
         )
         row = self.env.cr.fetchone()
+        if not row:
+            raise UserError("Unable to initialize the email rate-limit state.")
         state_id, current_start, sent_count = row
 
         if current_start != window_start:
@@ -116,8 +120,6 @@ class EmailRateQueue(models.Model):
             return
         self.state = "processing"
         try:
-            # mail.mail.send() applies the same outgoing-server rate gate used by
-            # Odoo's native queue, so Instant and Mass share one quota.
             self.mail_id.with_context(rate_limit_queue=True).send(
                 auto_commit=False,
                 raise_exception=True,
