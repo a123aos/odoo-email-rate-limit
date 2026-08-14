@@ -46,7 +46,8 @@
         <field name="view_mode">list,form</field>
     </record>
 
+    <!-- Odoo 19 defines the Technical > Email menu in the base module. -->
     <menuitem id="menu_email_rate_queue" name="Instant Email Queue"
-              parent="mail.menu_email" action="action_email_rate_queue"
+              parent="base.menu_email" action="action_email_rate_queue"
               sequence="90" groups="base.group_no_one"/>
 </odoo>
