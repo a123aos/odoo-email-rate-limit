@@ -19,12 +19,7 @@ class EmailRateLimitState(models.Model):
 
     @api.model
     def reserve(self, server, count=1):
-        """Reserve as many slots as possible in the current server window.
-
-        Returns ``(allowed_count, next_window)``. This deliberately supports
-        partial reservations so a batch of 5 with a limit of 2 sends 2 now and
-        leaves 3 for the next window.
-        """
+        """Reserve as many slots as possible in the current server window."""
         if not server.rate_limit_enabled or server.rate_limit_count <= 0 or count <= 0:
             return count, None
 
@@ -137,13 +132,14 @@ class EmailRateQueue(models.Model):
         try:
             allowed, delayed = self.mail_id._rate_limit_send()
             if not allowed:
-                self.write({
-                    "state": "pending",
-                    "scheduled_at": delayed or fields.Datetime.now(),
-                })
+                next_at = delayed[:1].scheduled_date if delayed else fields.Datetime.now() + timedelta(minutes=1)
+                self.write({"state": "pending", "scheduled_at": next_at})
                 return
 
-            self.mail_id.with_context(rate_limit_background=True).send(
+            self.mail_id.with_context(
+                rate_limit_background=True,
+                rate_limit_already_reserved=True,
+            ).send(
                 auto_commit=False,
                 raise_exception=True,
             )
