@@ -45,6 +45,6 @@
     </record>
 
     <menuitem id="menu_email_rate_queue" name="Instant Email Queue"
-              parent="mail.menu_email" action="action_email_rate_queue"
-              sequence="90" groups="base.group_no_one"/>
+              parent="base.menu_administration" action="action_email_rate_queue"
+              sequence="90" groups="base.group_system"/>
 </odoo>
