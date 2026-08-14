@@ -19,8 +19,14 @@ class EmailRateLimitState(models.Model):
 
     @api.model
     def reserve(self, server, count=1):
+        """Reserve as many slots as possible in the current server window.
+
+        Returns ``(allowed_count, next_window)``. This deliberately supports
+        partial reservations so a batch of 5 with a limit of 2 sends 2 now and
+        leaves 3 for the next window.
+        """
         if not server.rate_limit_enabled or server.rate_limit_count <= 0 or count <= 0:
-            return True, None
+            return count, None
 
         window = max(server.rate_limit_window, 1)
         now = datetime.now(timezone.utc)
@@ -29,13 +35,10 @@ class EmailRateLimitState(models.Model):
         window_start = datetime.fromtimestamp(start_seconds, tz=timezone.utc).replace(tzinfo=None)
         table = self._table
 
-        # Create the single state row if needed. Do not name an ON CONFLICT
-        # target here: this keeps the SQL valid even on databases where the
-        # model constraint has not been materialized yet (e.g. during module
-        # upgrades). The subsequent SELECT ... FOR UPDATE serializes access.
         self.env.cr.execute(
             f"""
-            INSERT INTO {table} (mail_server_id, window_start, sent_count, create_uid, create_date, write_uid, write_date)
+            INSERT INTO {table}
+                (mail_server_id, window_start, sent_count, create_uid, create_date, write_uid, write_date)
             VALUES (%s, %s, 0, %s, NOW(), %s, NOW())
             ON CONFLICT DO NOTHING
             """,
@@ -48,8 +51,8 @@ class EmailRateLimitState(models.Model):
         row = self.env.cr.fetchone()
         if not row:
             raise UserError("Unable to initialize the email rate-limit state.")
-        state_id, current_start, sent_count = row
 
+        state_id, current_start, sent_count = row
         if current_start != window_start:
             sent_count = 0
             self.env.cr.execute(
@@ -57,15 +60,19 @@ class EmailRateLimitState(models.Model):
                 (window_start, self.env.uid, state_id),
             )
 
-        if sent_count + count > server.rate_limit_count:
-            next_window = window_start + timedelta(seconds=window)
-            return False, fields.Datetime.to_string(next_window)
+        available = max(server.rate_limit_count - sent_count, 0)
+        allowed_count = min(count, available)
+        if allowed_count:
+            self.env.cr.execute(
+                f"UPDATE {table} SET sent_count=%s, write_uid=%s, write_date=NOW() WHERE id=%s",
+                (sent_count + allowed_count, self.env.uid, state_id),
+            )
 
-        self.env.cr.execute(
-            f"UPDATE {table} SET sent_count=%s, write_uid=%s, write_date=NOW() WHERE id=%s",
-            (sent_count + count, self.env.uid, state_id),
-        )
-        return True, None
+        next_window = None
+        if allowed_count < count:
+            next_window = fields.Datetime.to_string(window_start + timedelta(seconds=window))
+
+        return allowed_count, next_window
 
 
 class EmailRateQueue(models.Model):
@@ -92,9 +99,17 @@ class EmailRateQueue(models.Model):
 
     @api.model
     def enqueue(self, mail, mail_server=None, priority=10):
-        server = mail_server or mail.mail_server_id
+        server = mail_server
+        if not server:
+            if mail.mail_server_id:
+                server = mail.mail_server_id
+            else:
+                groups = list(mail._split_by_mail_configuration())
+                if groups:
+                    server = self.env["ir.mail_server"].browse(groups[0][0])
         if not server:
             raise UserError("An outgoing mail server is required for the instant email queue.")
+
         existing = self.search([("mail_id", "=", mail.id)], limit=1)
         if existing:
             return existing
@@ -120,7 +135,15 @@ class EmailRateQueue(models.Model):
             return
         self.state = "processing"
         try:
-            self.mail_id.with_context(rate_limit_queue=True).send(
+            allowed, delayed = self.mail_id._rate_limit_send()
+            if not allowed:
+                self.write({
+                    "state": "pending",
+                    "scheduled_at": delayed or fields.Datetime.now(),
+                })
+                return
+
+            self.mail_id.with_context(rate_limit_background=True).send(
                 auto_commit=False,
                 raise_exception=True,
             )
