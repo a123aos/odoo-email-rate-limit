@@ -9,45 +9,68 @@ _logger = logging.getLogger(__name__)
 class MailMail(models.Model):
     _inherit = "mail.mail"
 
-    rate_limit_retry_count = fields.Integer(string="Rate-Limit Retries", default=0, copy=False, readonly=True)
-    rate_limit_fallback_used = fields.Boolean(string="Fallback Used", default=False, copy=False, readonly=True)
-    rate_limit_server_id = fields.Many2one("ir.mail_server", string="Rate-Limit Server", copy=False, readonly=True)
+    rate_limit_retry_count = fields.Integer(
+        string="Rate-Limit Retries", default=0, copy=False, readonly=True
+    )
+    rate_limit_fallback_used = fields.Boolean(
+        string="Fallback Used", default=False, copy=False, readonly=True
+    )
+    rate_limit_server_id = fields.Many2one(
+        "ir.mail_server", string="Rate-Limit Server", copy=False, readonly=True
+    )
 
     def _rate_limit_is_exempt(self):
         return bool(self.env.context.get("rate_limit_bypass"))
 
     def _rate_limit_prepare_batch(self, mail_server, batch_ids):
-        if not mail_server or not mail_server.rate_limit_enabled or self._rate_limit_is_exempt():
+        """Reserve one-minute sending quota for a batch.
+
+        The quota belongs to the outgoing server, so every background sender
+        using that server shares the same counter. A PostgreSQL row lock makes
+        the reservation atomic across Odoo workers.
+        """
+        if (
+            not mail_server
+            or not mail_server.rate_limit_enabled
+            or self._rate_limit_is_exempt()
+        ):
             return self.browse(batch_ids)
 
-        mails = self.browse(batch_ids).filtered(lambda m: m.state == "outgoing")
+        mails = self.browse(batch_ids).filtered(lambda mail: mail.state == "outgoing")
         if not mails:
             return mails
 
-        now = fields.Datetime.now()
-        window = now.replace(second=0, microsecond=0)
+        current_window = fields.Datetime.now().replace(second=0, microsecond=0)
         self.env.cr.execute(
-            "SELECT rate_limit_window, rate_limit_count FROM ir_mail_server WHERE id = %s FOR UPDATE",
+            """
+                SELECT rate_limit_window, rate_limit_count
+                  FROM ir_mail_server
+                 WHERE id = %s
+                 FOR UPDATE
+            """,
             [mail_server.id],
         )
         row = self.env.cr.fetchone()
-        current_window = fields.Datetime.to_datetime(row[0]) if row and row[0] else None
-        current_count = row[1] if row else 0
-        if current_window != window:
-            current_window = window
+        stored_window = fields.Datetime.to_datetime(row[0]) if row and row[0] else False
+        current_count = int(row[1] or 0) if row else 0
+
+        if stored_window != current_window:
             current_count = 0
 
+        limit = mail_server.rate_limit_per_minute
         allowed = self.browse()
         delayed = self.browse()
         future_window = current_window
         future_count = current_count
-        limit = mail_server.rate_limit_per_minute
 
-        for mail in mails.sorted(lambda m: (m.create_date, m.id)):
+        for mail in mails.sorted(lambda record: (record.create_date, record.id)):
             if current_count < limit:
                 allowed |= mail
                 current_count += 1
-                mail.write({"rate_limit_server_id": mail_server.id, "scheduled_date": False})
+                mail.write({
+                    "rate_limit_server_id": mail_server.id,
+                    "scheduled_date": False,
+                })
                 continue
 
             delayed |= mail
@@ -55,8 +78,8 @@ class MailMail(models.Model):
                 future_window += datetime.timedelta(minutes=1)
                 future_count = 0
             mail.write({
-                "scheduled_date": future_window,
                 "rate_limit_server_id": mail_server.id,
+                "scheduled_date": future_window,
             })
             future_count += 1
 
@@ -66,20 +89,29 @@ class MailMail(models.Model):
         })
 
         if delayed:
-            cron = self.env.ref("mail.ir_cron_mail_scheduler_action", raise_if_not_found=False)
+            cron = self.env.ref(
+                "mail.ir_cron_mail_scheduler_action", raise_if_not_found=False
+            )
             if cron:
-                cron._trigger(min(delayed.mapped("scheduled_date")) + datetime.timedelta(seconds=1))
+                cron._trigger(
+                    min(delayed.mapped("scheduled_date"))
+                    + datetime.timedelta(seconds=1)
+                )
             _logger.info(
                 "Email rate limit: server %s allowed %s and delayed %s mail(s)",
-                mail_server.display_name, len(allowed), len(delayed),
+                mail_server.display_name,
+                len(allowed),
+                len(delayed),
             )
+
         return allowed
 
     def _split_by_mail_configuration(self):
         for mail_server_id, alias_domain_id, smtp_from, batch_ids in super()._split_by_mail_configuration():
             mail_server = (
                 self.env["ir.mail_server"].browse(mail_server_id).exists()
-                if mail_server_id else self.env["ir.mail_server"]
+                if mail_server_id
+                else self.env["ir.mail_server"]
             )
             if mail_server and mail_server.rate_limit_enabled and not self._rate_limit_is_exempt():
                 allowed = self._rate_limit_prepare_batch(mail_server, batch_ids)
@@ -92,41 +124,51 @@ class MailMail(models.Model):
     @staticmethod
     def _is_rate_limit_error(reason):
         text = (reason or "").lower()
-        return any(marker in text for marker in (
-            "sender frequency limited", "rate limit", "rate-limit",
-            "too many requests", "too many messages", "throttl", "429",
-        ))
+        return any(
+            marker in text
+            for marker in (
+                "sender frequency limited",
+                "rate limit",
+                "rate-limit",
+                "too many requests",
+                "too many messages",
+                "throttl",
+                "429",
+            )
+        )
 
     def _handle_rate_limit_failures(self, mails, mail_server):
         if not mail_server or self.env.context.get("rate_limit_no_fallback"):
             return
 
         failed = mails.filtered(
-            lambda m: m.rate_limit_server_id == mail_server
-            and m.state == "exception"
-            and self._is_rate_limit_error(m.failure_reason)
+            lambda mail: (
+                mail.rate_limit_server_id == mail_server
+                and mail.state == "exception"
+                and self._is_rate_limit_error(mail.failure_reason)
+            )
         )
         if not failed:
             return
 
         retry = failed.filtered(
-            lambda m: not m.rate_limit_fallback_used
-            and m.rate_limit_retry_count < mail_server.fallback_max_retries
+            lambda mail: (
+                not mail.rate_limit_fallback_used
+                and mail.rate_limit_retry_count < mail_server.fallback_max_retries
+            )
         )
         for mail in retry:
             mail.write({
                 "state": "outgoing",
-                "scheduled_date": fields.Datetime.now() + datetime.timedelta(seconds=mail_server.fallback_retry_delay),
+                "scheduled_date": fields.Datetime.now()
+                + datetime.timedelta(seconds=mail_server.fallback_retry_delay),
                 "rate_limit_retry_count": mail.rate_limit_retry_count + 1,
             })
-        if retry:
-            _logger.warning(
-                "Primary mail server %s was rate-limited; %s mail(s) scheduled for retry.",
-                mail_server.display_name, len(retry),
-            )
 
         exhausted = failed - retry
-        if not exhausted or not mail_server.fallback_enabled or not mail_server.fallback_server_id:
+        if not exhausted:
+            return
+        if not mail_server.fallback_enabled or not mail_server.fallback_server_id:
             return
 
         fallback = mail_server.fallback_server_id
@@ -138,10 +180,13 @@ class MailMail(models.Model):
             "rate_limit_fallback_used": True,
             "rate_limit_retry_count": 0,
         })
-        _logger.error(
+        _logger.warning(
             "Primary mail server %s remained rate-limited; %s mail(s) moved to fallback %s.",
-            mail_server.display_name, len(exhausted),
+            mail_server.display_name,
+            len(exhausted),
+            fallback.display_name,
         )
+        # Do not bypass the fallback server's own rate limit.
         exhausted.with_context(rate_limit_no_fallback=True).send()
 
     def send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
@@ -157,5 +202,7 @@ class MailMail(models.Model):
         return result
 
     def action_send_and_close(self):
-        """Manual send is an explicit operator action and bypasses background throttling."""
-        return super(MailMail, self.with_context(rate_limit_bypass=True)).action_send_and_close()
+        """Explicit operator action: bypass background rate limiting."""
+        return super(
+            MailMail, self.with_context(rate_limit_bypass=True)
+        ).action_send_and_close()
