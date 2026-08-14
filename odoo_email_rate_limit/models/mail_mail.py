@@ -29,13 +29,15 @@ class MailMail(models.Model):
         return allowed, delayed
 
     def send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
-        """Limit background delivery while leaving manual Send Now untouched.
-
-        Odoo's native queue calls ``send(auto_commit=True)``. Instant Queue
-        sets ``rate_limit_background`` explicitly. Manual Send Now calls the
-        native method without that flag and therefore bypasses this limiter.
-        """
+        """Limit background delivery while leaving manual Send Now untouched."""
         if not (auto_commit or self.env.context.get("rate_limit_background")):
+            return super().send(
+                auto_commit=auto_commit,
+                raise_exception=raise_exception,
+                post_send_callback=post_send_callback,
+            )
+
+        if self.env.context.get("rate_limit_already_reserved"):
             return super().send(
                 auto_commit=auto_commit,
                 raise_exception=raise_exception,
