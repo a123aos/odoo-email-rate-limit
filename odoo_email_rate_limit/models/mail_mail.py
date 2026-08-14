@@ -5,12 +5,7 @@ class MailMail(models.Model):
     _inherit = "mail.mail"
 
     def _rate_limit_send(self):
-        """Return the background mails allowed by the shared server quota.
-
-        This is intentionally not wired into ``send()``. The Email form's
-        manual Send Now path must remain completely outside this module's
-        limiter. Background queue callers explicitly use this method.
-        """
+        """Return the background mails allowed by the shared server quota."""
         allowed = self.browse()
         delayed = self.browse()
         state_model = self.env["email.rate.limit.state"].sudo()
@@ -33,12 +28,20 @@ class MailMail(models.Model):
 
         return allowed, delayed
 
-    def _send_background(self, auto_commit=False, raise_exception=False, post_send_callback=None):
-        """Send background mail through the shared rate limiter.
+    def send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
+        """Limit background delivery while leaving manual Send Now untouched.
 
-        Manual ``mail.mail.send()`` is deliberately untouched, so Send Now
-        from the Email form bypasses the limiter.
+        Odoo's native queue calls ``send(auto_commit=True)``. Instant Queue
+        sets ``rate_limit_background`` explicitly. Manual Send Now calls the
+        native method without that flag and therefore bypasses this limiter.
         """
+        if not (auto_commit or self.env.context.get("rate_limit_background")):
+            return super().send(
+                auto_commit=auto_commit,
+                raise_exception=raise_exception,
+                post_send_callback=post_send_callback,
+            )
+
         allowed, _delayed = self._rate_limit_send()
         if not allowed:
             return True
@@ -47,3 +50,7 @@ class MailMail(models.Model):
             raise_exception=raise_exception,
             post_send_callback=post_send_callback,
         )
+
+    def send_after_commit(self):
+        """Rate-limit automatic post-commit delivery."""
+        return super().with_context(rate_limit_background=True).send_after_commit()
