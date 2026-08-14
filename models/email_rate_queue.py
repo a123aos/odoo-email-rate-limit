@@ -27,18 +27,21 @@ class EmailRateQueue(models.Model):
     def enqueue(self, mail, mail_server=None, priority=10):
         server = mail_server or mail.mail_server_id
         if not server:
-            # Let Odoo's normal server selection happen when send() is called.
             server = self.env["ir.mail_server"].search([], order="sequence, id", limit=1)
         if not server:
             return self.browse()
         existing = self.search([("mail_id", "=", mail.id)], limit=1)
         if existing:
             return existing
-        return self.create({
+        item = self.create({
             "mail_id": mail.id,
             "mail_server_id": server.id,
             "priority": priority,
         })
+        cron = self.env.ref("odoo_email_rate_limit.ir_cron_email_rate_queue", raise_if_not_found=False)
+        if cron:
+            cron._trigger()
+        return item
 
     @api.model
     def _cron_process(self):
@@ -50,9 +53,16 @@ class EmailRateQueue(models.Model):
         for item in items:
             item._process_one()
 
+    def _trigger_at(self, at=None):
+        cron = self.env.ref("odoo_email_rate_limit.ir_cron_email_rate_queue", raise_if_not_found=False)
+        if cron:
+            cron._trigger(at)
+
     def _process_one(self):
         self.ensure_one()
-        if self.state != "pending" or not self.mail_id.exists():
+        if self.state != "pending":
+            return
+        if not self.mail_id.exists():
             self.write({"state": "done"})
             return
 
@@ -65,22 +75,21 @@ class EmailRateQueue(models.Model):
             return
 
         mail.invalidate_recordset(["state", "scheduled_date", "failure_reason", "mail_server_id"])
-        if not mail.exists():
+        if not mail.exists() or mail.state == "sent":
             self.write({"state": "done", "error_message": False})
             return
 
-        if mail.state == "sent":
-            self.write({"state": "done", "error_message": False})
-        elif mail.state == "outgoing":
-            # The shared outgoing-server gate deferred this message to a later
-            # minute. Keep the custom queue item aligned with mail.mail.
+        if mail.state == "outgoing":
+            scheduled_at = mail.scheduled_date or fields.Datetime.now()
             self.write({
                 "state": "pending",
-                "scheduled_at": mail.scheduled_date or fields.Datetime.now(),
+                "scheduled_at": scheduled_at,
                 "error_message": mail.failure_reason or False,
             })
-        else:
-            self.write({
-                "state": "failed",
-                "error_message": mail.failure_reason or "Email delivery failed.",
-            })
+            self._trigger_at(scheduled_at)
+            return
+
+        self.write({
+            "state": "failed",
+            "error_message": mail.failure_reason or "Email delivery failed.",
+        })
