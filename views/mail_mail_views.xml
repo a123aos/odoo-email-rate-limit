@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_mail_mail_rate_limit_tree" model="ir.ui.view">
+        <field name="name">mail.mail.list.rate.limit</field>
+        <field name="model">mail.mail</field>
+        <field name="inherit_id" ref="mail.view_mail_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//button[@name='send']" position="attributes">
+                <attribute name="name">action_manual_send</attribute>
+            </xpath>
+        </field>
+    </record>
+</odoo>
