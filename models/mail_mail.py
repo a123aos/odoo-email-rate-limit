@@ -28,8 +28,7 @@ class MailMail(models.Model):
         The outgoing server owns the quota, so all mail paths using that server
         share it. Only the current window is reserved here. Anything that does
         not fit is deferred to the next minute; it is intentionally not counted
-        in advance, so concurrent workers cannot accidentally double-reserve a
-        future window.
+        in advance, so concurrent workers cannot double-reserve a future window.
         """
         if (
             not mail_server
@@ -179,8 +178,8 @@ class MailMail(models.Model):
             len(exhausted),
             fallback.display_name,
         )
-        # The fallback send still passes through the fallback server's own
-        # limiter. This context only prevents recursive fallback.
+        # This context prevents recursive fallback. The fallback server's own
+        # rate limiter is still enforced by _split_by_mail_configuration().
         exhausted.with_context(rate_limit_no_fallback=True).send()
 
     def send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
@@ -194,6 +193,12 @@ class MailMail(models.Model):
             for mail_server in fresh.mapped("rate_limit_server_id"):
                 self._handle_rate_limit_failures(fresh, mail_server)
         return result
+
+    def action_manual_send(self):
+        """Manual Send Now from the Emails screen bypasses background throttling."""
+        return self.with_context(rate_limit_bypass=True).send(
+            auto_commit=False, raise_exception=True
+        )
 
     def action_send_and_close(self):
         """Explicit operator action: bypass background rate limiting."""
