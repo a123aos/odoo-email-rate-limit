@@ -39,21 +39,31 @@ class MailMail(models.Model):
 
         allowed = self.browse()
         delayed = self.browse()
-        next_window = current_window
+        future_window = current_window
+        future_count = current_count
         limit = mail_server.rate_limit_per_minute
 
         for mail in mails.sorted(lambda m: (m.create_date, m.id)):
-            cost = max(1, len(mail.recipient_ids))
-            if current_count + cost <= limit:
+            if current_count < limit:
                 allowed |= mail
-                current_count += cost
+                current_count += 1
                 mail.write({"rate_limit_server_id": mail_server.id, "scheduled_date": False})
-            else:
-                delayed |= mail
-                next_window += datetime.timedelta(minutes=1)
-                mail.write({"scheduled_date": next_window, "rate_limit_server_id": mail_server.id})
+                continue
 
-        mail_server.sudo().write({"rate_limit_window": current_window, "rate_limit_count": current_count})
+            delayed |= mail
+            if future_count >= limit:
+                future_window += datetime.timedelta(minutes=1)
+                future_count = 0
+            mail.write({
+                "scheduled_date": future_window,
+                "rate_limit_server_id": mail_server.id,
+            })
+            future_count += 1
+
+        mail_server.sudo().write({
+            "rate_limit_window": current_window,
+            "rate_limit_count": current_count,
+        })
 
         if delayed:
             cron = self.env.ref("mail.ir_cron_mail_scheduler_action", raise_if_not_found=False)
