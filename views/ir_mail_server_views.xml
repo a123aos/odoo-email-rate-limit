@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="ir_mail_server_rate_limit_view_form" model="ir.ui.view">
+        <field name="name">ir.mail_server.view.form.inherit.rate.limit</field>
+        <field name="model">ir.mail_server</field>
+        <field name="inherit_id" ref="base.ir_mail_server_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page name="email_rate_limit" string="Rate Limiting">
+                    <group>
+                        <group string="Sending Limit">
+                            <field name="rate_limit_enabled"/>
+                            <field name="rate_limit_per_minute" invisible="not rate_limit_enabled"/>
+                        </group>
+                        <group string="Current Window" invisible="not rate_limit_enabled">
+                            <field name="rate_limit_window" readonly="1"/>
+                            <field name="rate_limit_count" readonly="1"/>
+                        </group>
+                    </group>
+                    <separator string="Fallback"/>
+                    <group>
+                        <group>
+                            <field name="fallback_enabled"/>
+                            <field name="fallback_server_id" invisible="not fallback_enabled"/>
+                        </group>
+                        <group>
+                            <field name="fallback_max_retries" invisible="not fallback_enabled"/>
+                            <field name="fallback_retry_delay" invisible="not fallback_enabled"/>
+                        </group>
+                    </group>
+                    <div class="text-muted" colspan="4">
+                        Rate limiting is shared by all queued and automatically sent mail using this outgoing server.
+                        Manual send from the Emails screen bypasses this background limiter.
+                    </div>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>
