@@ -1,5 +1,7 @@
 from odoo import api, fields, models
 
+from .sender_pool import EmailSenderPoolState
+
 
 class IrMailServer(models.Model):
     _inherit = "ir.mail_server"
@@ -37,4 +39,4 @@ class IrMailServer(models.Model):
         servers = self._sender_pool_servers(pool)
         if not servers:
             return self.browse()
-        return self.env["email.sender.pool.state"].sudo().select_server(pool, servers)
+        return EmailSenderPoolState(self.env).select_server(pool, servers)
