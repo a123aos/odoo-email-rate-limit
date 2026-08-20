@@ -8,7 +8,10 @@ class EmailSenderPoolState(models.Model):
     pool = fields.Selection([("signup", "Signup"), ("order", "Order")], required=True, index=True)
     next_index = fields.Integer(default=0)
 
-    _sql_constraints = [("pool_unique", "unique(pool)", "There must be one round-robin state per sender pool.")]
+    _pool_unique = models.Constraint(
+        "UNIQUE(pool)",
+        "There must be one round-robin state per sender pool.",
+    )
 
     @api.model
     def select_server(self, pool, servers):
