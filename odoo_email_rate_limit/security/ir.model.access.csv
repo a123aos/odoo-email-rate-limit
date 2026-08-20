@@ -2,4 +2,3 @@ id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_email_rate_limit_state_system,email.rate.limit.state system,model_email_rate_limit_state,base.group_system,1,1,1,1
 access_email_rate_limit_org_state_system,email.rate.limit.org.state system,model_email_rate_limit_org_state,base.group_system,1,1,1,1
 access_email_rate_queue_system,email.rate.queue system,model_email_rate_queue,base.group_system,1,1,1,1
-access_email_rate_limit_dashboard_system,email.rate.limit.dashboard system,model_email_rate_limit_dashboard,base.group_system,1,1,1,1
