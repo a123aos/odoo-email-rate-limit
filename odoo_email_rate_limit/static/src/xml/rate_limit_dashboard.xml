@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="odoo_email_rate_limit.EmailRateLimitDashboard">
+        <div class="o_email_rate_limit_dashboard p-4">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h2 class="mb-1">Email Rate Limit</h2>
+                    <div class="text-muted">Lark · Daily quota resets at 00:00 UTC</div>
+                </div>
+                <button class="btn btn-secondary" t-on-click="load" t-att-disabled="state.loading">
+                    <i class="fa fa-refresh me-1"/> Refresh
+                </button>
+            </div>
+            <t t-if="state.error">
+                <div class="alert alert-danger"><t t-esc="state.error"/></div>
+            </t>
+            <t t-elif="state.loading">
+                <div class="text-center p-5"><i class="fa fa-spinner fa-spin fa-2x"/></div>
+            </t>
+            <t t-else="">
+                <div class="row g-3 mb-4">
+                    <t t-foreach="state.servers" t-as="server" t-key="server.id">
+                        <div class="col-12 col-xl-6">
+                            <div class="card shadow-sm h-100">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between mb-3">
+                                        <h4 class="mb-0"><t t-esc="server.name"/></h4>
+                                        <span class="badge text-bg-light"><t t-esc="server.pool_label"/></span>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-6">
+                                            <div class="text-muted">Emails</div>
+                                            <strong><t t-esc="server.sent_count"/> / <t t-esc="server.email_limit"/></strong>
+                                            <div class="progress mt-2"><div class="progress-bar" t-att-style="'width:' + server.email_percent + '%'"/></div>
+                                            <small class="text-muted"><t t-esc="server.email_remaining"/> remaining</small>
+                                        </div>
+                                        <div class="col-6">
+                                            <div class="text-muted">External Recipients</div>
+                                            <strong><t t-esc="server.external_count"/> / <t t-esc="server.external_limit"/></strong>
+                                            <div class="progress mt-2"><div class="progress-bar" t-att-style="'width:' + server.external_percent + '%'"/></div>
+                                            <small class="text-muted"><t t-esc="server.external_remaining"/> remaining</small>
+                                        </div>
+                                    </div>
+                                    <div class="text-muted mt-3">Reset: <t t-esc="formatReset(server.reset_at)"/></div>
+                                </div>
+                            </div>
+                        </div>
+                    </t>
+                </div>
+                <div class="card shadow-sm">
+                    <div class="card-body">
+                        <h4>Organization External Recipients</h4>
+                        <strong><t t-esc="state.organization.count"/> / <t t-esc="state.organization.limit"/></strong>
+                        <div class="progress mt-2"><div class="progress-bar" t-att-style="'width:' + state.organization.percent + '%'"/></div>
+                        <small class="text-muted"><t t-esc="state.organization.remaining"/> remaining · Reset: <t t-esc="formatReset(state.organization.reset_at)"/></small>
+                    </div>
+                </div>
+            </t>
+        </div>
+    </t>
+</templates>
