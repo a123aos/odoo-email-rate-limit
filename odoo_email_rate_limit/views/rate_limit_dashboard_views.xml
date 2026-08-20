@@ -18,16 +18,17 @@
         </field>
     </record>
 
-    <record id="email_rate_limit_dashboard_action" model="ir.actions.server">
+    <record id="email_rate_limit_dashboard_action" model="ir.actions.act_window">
         <field name="name">Email Rate Limit Dashboard</field>
-        <field name="model_id" ref="base.model_ir_mail_server"/>
-        <field name="state">code</field>
-        <field name="code">action = env['email.rate.limit.dashboard'].action_open_dashboard()</field>
+        <field name="res_model">email.rate.limit.dashboard</field>
+        <field name="view_mode">list</field>
+        <field name="view_id" ref="email_rate_limit_dashboard_list"/>
     </record>
 
     <menuitem id="email_rate_limit_dashboard_menu"
               name="Rate Limit Dashboard"
-              parent="mail.menu_mail_servers"
+              parent="base.menu_mail_servers"
               action="email_rate_limit_dashboard_action"
-              sequence="20"/>
+              sequence="20"
+              groups="base.group_no_one"/>
 </odoo>
