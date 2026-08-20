@@ -74,6 +74,7 @@ class EmailRateLimitState(models.Model):
 class EmailRateLimitOrgState(models.Model):
     _name = "email.rate.limit.org.state"
     _description = "Organization Email External Recipient Rate Limit"
+
     key = fields.Char(default="organization", required=True)
     window_start = fields.Datetime(required=True)
     external_recipients = fields.Json(default=lambda self: {})
@@ -94,21 +95,34 @@ class EmailRateLimitOrgState(models.Model):
     @api.model
     def get_dashboard_status(self):
         State = self.env["email.rate.limit.state"].sudo()
-        servers = self.env["ir.mail_server"].sudo().search([("active", "=", True), ("rate_limit_enabled", "=", True)], limit=1)
+        servers = self.env["ir.mail_server"].sudo().search([("active", "=", True), ("rate_limit_enabled", "=", True)])
+        if not servers:
+            return {"enabled": False, "count": 0, "limit": 0, "remaining": 0, "percent": 0, "reset_at": False}
+
+        # Lark resets its daily quota at 00:00 UTC. The rate-limit state owns
+        # the canonical UTC window calculation, so the dashboard must use it too.
         window = max(max(servers.mapped("rate_limit_window") or [86400]), 1)
-        start = self._window_start(window)
-        state = self.search([("key", "=", "organization")], limit=1)
+        start = State._window_start(window)
+        state = self.sudo().search([("key", "=", "organization")], limit=1)
         current = bool(state and state.window_start == start)
         count = len(state.external_recipients or {}) if current else 0
         limit = max(max(servers.mapped("rate_limit_org_external_count") or [500]), 0)
         reset_at = datetime.fromtimestamp(start.replace(tzinfo=timezone.utc).timestamp() + window, tz=timezone.utc)
-        return {"count": count, "limit": limit, "remaining": max(limit - count, 0), "percent": min(100, round(count * 100 / limit, 1)) if limit else 0, "reset_at": reset_at.isoformat()}
+        return {
+            "enabled": True,
+            "count": count,
+            "limit": limit,
+            "remaining": max(limit - count, 0),
+            "percent": min(100, round(count * 100 / limit, 1)) if limit else 0,
+            "reset_at": reset_at.isoformat(),
+        }
 
 
 class EmailRateQueue(models.Model):
     _name = "email.rate.queue"
     _description = "Instant Email Queue"
     _order = "priority desc, scheduled_at, id"
+
     mail_id = fields.Many2one("mail.mail", required=True, ondelete="cascade", index=True)
     mail_server_id = fields.Many2one("ir.mail_server", required=True, index=True)
     priority = fields.Integer(default=10)
