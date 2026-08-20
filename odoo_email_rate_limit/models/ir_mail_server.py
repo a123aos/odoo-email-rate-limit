@@ -7,10 +7,26 @@ class IrMailServer(models.Model):
     _inherit = "ir.mail_server"
 
     rate_limit_enabled = fields.Boolean(string="Enable Rate Limit")
-    rate_limit_count = fields.Integer(string="Emails per Window", default=450)
-    rate_limit_window = fields.Integer(string="Window (seconds)", default=86400)
-    rate_limit_external_count = fields.Integer(string="External Recipients per Window", default=200)
-    rate_limit_org_external_count = fields.Integer(string="Organization External Recipients per Window", default=500)
+    rate_limit_count = fields.Integer(
+        string="Emails per Reset Period",
+        default=450,
+        help="Maximum emails allowed for this sender during the reset period. For Lark daily limits, the period resets at 00:00 UTC.",
+    )
+    rate_limit_window = fields.Integer(
+        string="Reset Period (seconds)",
+        default=86400,
+        help="Rate-limit period in seconds. With the default 86400 seconds, the counter is aligned to UTC calendar days and resets at 00:00 UTC (Lark).",
+    )
+    rate_limit_external_count = fields.Integer(
+        string="External Recipients per Reset Period",
+        default=200,
+        help="Maximum unique external recipients for this sender during the reset period. With a 86400-second period, resets at 00:00 UTC.",
+    )
+    rate_limit_org_external_count = fields.Integer(
+        string="Organization External Recipients per Reset Period",
+        default=500,
+        help="Maximum unique external recipients across the organization during the reset period. With a 86400-second period, resets at 00:00 UTC.",
+    )
     rate_limit_internal_domains = fields.Char(
         string="Internal Email Domains",
         default=lambda self: self.env.company.email.split("@", 1)[1].lower()
