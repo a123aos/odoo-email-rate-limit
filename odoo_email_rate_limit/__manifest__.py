@@ -10,7 +10,7 @@
         "views/email_queue_views.xml",
         "data/ir_cron.xml",
     ],
-    "installable": true,
-    "application": false,
+    "installable": True,
+    "application": False,
     "license": "LGPL-3",
 }
