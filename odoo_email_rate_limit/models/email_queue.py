@@ -15,7 +15,7 @@ class EmailRateLimitState(models.Model):
     sent_count = fields.Integer(default=0)
     external_recipients = fields.Json(default=lambda self: {})
 
-    _sql_constraints = [("server_unique", "unique(mail_server_id)", "There must be one rate-limit state per mail server.")]
+    _server_unique = models.Constraint("UNIQUE(mail_server_id)", "There must be one rate-limit state per mail server.")
 
     @api.model
     def _window_start(self, seconds):
@@ -88,7 +88,7 @@ class EmailRateLimitOrgState(models.Model):
     window_start = fields.Datetime(required=True)
     external_recipients = fields.Json(default=lambda self: {})
 
-    _sql_constraints = [("key_unique", "unique(key)", "There must be one organization rate-limit state.")]
+    _key_unique = models.Constraint("UNIQUE(key)", "There must be one organization rate-limit state.")
 
     @api.model
     def _lock(self, window_start):
@@ -120,7 +120,7 @@ class EmailRateQueue(models.Model):
     fallback_used = fields.Boolean(default=False)
     error_message = fields.Text()
 
-    _sql_constraints = [("mail_unique", "unique(mail_id)", "An email can only have one instant queue item.")]
+    _mail_unique = models.Constraint("UNIQUE(mail_id)", "An email can only have one instant queue item.")
 
     @api.model
     def enqueue(self, mail, mail_server=None, priority=10):
