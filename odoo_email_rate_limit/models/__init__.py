@@ -4,4 +4,3 @@ from . import email_queue
 from . import mail_mail
 from . import mail_template
 from . import res_partner
-from . import rate_limit_dashboard
