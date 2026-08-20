@@ -4,5 +4,12 @@
         <field name="name">Rate Limit Dashboard</field>
         <field name="tag">email_rate_limit_dashboard</field>
     </record>
-    <menuitem id="menu_email_rate_limit_dashboard" name="Rate Limit Dashboard" parent="mail.menu_mail_server" action="action_email_rate_limit_dashboard" sequence="5"/>
+    <menuitem
+        id="menu_email_rate_limit_dashboard"
+        name="Rate Limit Dashboard"
+        parent="base.menu_email"
+        action="action_email_rate_limit_dashboard"
+        sequence="5"
+        groups="base.group_no_one"
+    />
 </odoo>
