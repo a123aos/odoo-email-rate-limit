@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="email_rate_limit_dashboard_list" model="ir.ui.view">
+        <field name="name">email.rate.limit.dashboard.list</field>
+        <field name="model">email.rate.limit.dashboard</field>
+        <field name="arch" type="xml">
+            <list string="Email Rate Limit Dashboard" create="false" delete="false" edit="false">
+                <field name="mail_server_id"/>
+                <field name="pool"/>
+                <field name="sent_count" string="Emails Used"/>
+                <field name="period_limit" string="Emails Limit"/>
+                <field name="email_remaining" string="Emails Remaining"/>
+                <field name="external_count" string="External Used"/>
+                <field name="external_limit" string="External Limit"/>
+                <field name="external_remaining" string="External Remaining"/>
+                <field name="reset_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="email_rate_limit_dashboard_action" model="ir.actions.server">
+        <field name="name">Email Rate Limit Dashboard</field>
+        <field name="model_id" ref="base.model_ir_mail_server"/>
+        <field name="state">code</field>
+        <field name="code">action = env['email.rate.limit.dashboard'].action_open_dashboard()</field>
+    </record>
+
+    <menuitem id="email_rate_limit_dashboard_menu"
+              name="Rate Limit Dashboard"
+              parent="mail.menu_mail_servers"
+              action="email_rate_limit_dashboard_action"
+              sequence="20"/>
+</odoo>
