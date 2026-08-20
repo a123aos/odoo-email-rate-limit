@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="action_email_rate_limit_dashboard" model="ir.actions.client">
+        <field name="name">Rate Limit Dashboard</field>
+        <field name="tag">email_rate_limit_dashboard</field>
+    </record>
+    <menuitem id="menu_email_rate_limit_dashboard" name="Rate Limit Dashboard" parent="mail.menu_mail_server" action="action_email_rate_limit_dashboard" sequence="5"/>
+</odoo>
