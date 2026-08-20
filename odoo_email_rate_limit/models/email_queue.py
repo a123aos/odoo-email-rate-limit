@@ -1,6 +1,7 @@
+import json
 from datetime import datetime, timedelta, timezone
 
-from odoo import api, fields, models
+from odoo import api, fields, models, tools
 from odoo.exceptions import UserError
 
 
@@ -12,62 +13,97 @@ class EmailRateLimitState(models.Model):
     mail_server_id = fields.Many2one("ir.mail_server", required=True, ondelete="cascade", index=True)
     window_start = fields.Datetime(required=True, index=True)
     sent_count = fields.Integer(default=0)
+    external_recipients = fields.Json(default=lambda self: {})
 
-    _sql_constraints = [
-        ("server_unique", "unique(mail_server_id)", "There must be one rate-limit state per mail server."),
-    ]
+    _sql_constraints = [("server_unique", "unique(mail_server_id)", "There must be one rate-limit state per mail server.")]
 
     @api.model
-    def reserve(self, server, count=1):
-        """Reserve as many slots as possible in the current server window."""
-        if not server.rate_limit_enabled or server.rate_limit_count <= 0 or count <= 0:
-            return count, None
-
-        window = max(server.rate_limit_window, 1)
+    def _window_start(self, seconds):
+        seconds = max(int(seconds or 86400), 1)
         now = datetime.now(timezone.utc)
         epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-        start_seconds = int((now - epoch).total_seconds()) // window * window
-        window_start = datetime.fromtimestamp(start_seconds, tz=timezone.utc).replace(tzinfo=None)
-        table = self._table
+        start = int((now - epoch).total_seconds()) // seconds * seconds
+        return datetime.fromtimestamp(start, tz=timezone.utc).replace(tzinfo=None)
 
+    @api.model
+    def _external_recipients(self, server, recipients):
+        domains = {d.strip().lower().lstrip("@").rstrip(".") for d in (server.rate_limit_internal_domains or "").split(",") if d.strip()}
+        result = set()
+        for email in recipients or []:
+            for value in tools.mail.email_normalize_all(email or ""):
+                address = value.lower().strip()
+                if "@" in address and address.rsplit("@", 1)[1] not in domains:
+                    result.add(address)
+        return result
+
+    @api.model
+    def reserve(self, server, count=1, recipients=None):
+        if not server.rate_limit_enabled or count <= 0:
+            return True, None
+        window = max(server.rate_limit_window, 1)
+        window_start = self._window_start(window)
+        table = self._table
         self.env.cr.execute(
-            f"""
-            INSERT INTO {table}
-                (mail_server_id, window_start, sent_count, create_uid, create_date, write_uid, write_date)
-            VALUES (%s, %s, 0, %s, NOW(), %s, NOW())
-            ON CONFLICT DO NOTHING
-            """,
-            (server.id, window_start, self.env.uid, self.env.uid),
+            f"INSERT INTO {table} (mail_server_id,window_start,sent_count,external_recipients,create_uid,create_date,write_uid,write_date) VALUES (%s,%s,0,%s,%s,NOW(),%s,NOW()) ON CONFLICT (mail_server_id) DO NOTHING",
+            (server.id, window_start, "{}", self.env.uid, self.env.uid),
         )
-        self.env.cr.execute(
-            f"SELECT id, window_start, sent_count FROM {table} WHERE mail_server_id = %s FOR UPDATE",
-            (server.id,),
-        )
+        self.env.cr.execute(f"SELECT id,window_start,sent_count,external_recipients FROM {table} WHERE mail_server_id=%s FOR UPDATE", (server.id,))
         row = self.env.cr.fetchone()
         if not row:
             raise UserError("Unable to initialize the email rate-limit state.")
-
-        state_id, current_start, sent_count = row
+        state_id, current_start, sent_count, sender_json = row
         if current_start != window_start:
             sent_count = 0
+            sender_json = {}
+        sender_json = sender_json or {}
+        external = self._external_recipients(server, recipients or [])
+        sender_seen = set(sender_json.keys())
+        new_sender_external = external - sender_seen
+
+        org = self.env["email.rate.limit.org.state"].sudo()._lock(window_start)
+        org_seen = set((org.external_recipients or {}).keys())
+        new_org_external = external - org_seen
+
+        sender_limit = max(server.rate_limit_external_count, 0)
+        org_limit = max(server.rate_limit_org_external_count, 0)
+        sender_ok = sent_count + count <= max(server.rate_limit_count, 0)
+        sender_external_ok = len(sender_seen) + len(new_sender_external) <= sender_limit if sender_limit else True
+        org_external_ok = len(org_seen) + len(new_org_external) <= org_limit if org_limit else True
+        if sender_ok and sender_external_ok and org_external_ok:
+            sender_json.update({email: True for email in new_sender_external})
             self.env.cr.execute(
-                f"UPDATE {table} SET window_start=%s, sent_count=0, write_uid=%s, write_date=NOW() WHERE id=%s",
-                (window_start, self.env.uid, state_id),
+                f"UPDATE {table} SET window_start=%s,sent_count=%s,external_recipients=%s,write_uid=%s,write_date=NOW() WHERE id=%s",
+                (window_start, sent_count + count, json.dumps(sender_json), self.env.uid, state_id),
             )
+            org.external_recipients = {**org_seen, **{email: True for email in new_org_external}}
+            return True, None
+        return False, fields.Datetime.to_string(window_start + timedelta(seconds=window))
 
-        available = max(server.rate_limit_count - sent_count, 0)
-        allowed_count = min(count, available)
-        if allowed_count:
-            self.env.cr.execute(
-                f"UPDATE {table} SET sent_count=%s, write_uid=%s, write_date=NOW() WHERE id=%s",
-                (sent_count + allowed_count, self.env.uid, state_id),
-            )
 
-        next_window = None
-        if allowed_count < count:
-            next_window = fields.Datetime.to_string(window_start + timedelta(seconds=window))
+class EmailRateLimitOrgState(models.Model):
+    _name = "email.rate.limit.org.state"
+    _description = "Organization Email External Recipient Rate Limit"
 
-        return allowed_count, next_window
+    key = fields.Char(default="organization", required=True)
+    window_start = fields.Datetime(required=True)
+    external_recipients = fields.Json(default=lambda self: {})
+
+    _sql_constraints = [("key_unique", "unique(key)", "There must be one organization rate-limit state.")]
+
+    @api.model
+    def _lock(self, window_start):
+        self.env.cr.execute(
+            f"INSERT INTO {self._table} (key,window_start,external_recipients,create_uid,create_date,write_uid,write_date) VALUES ('organization',%s,%s,%s,NOW(),%s,NOW()) ON CONFLICT (key) DO NOTHING",
+            (window_start, "{}", self.env.uid, self.env.uid),
+        )
+        self.env.cr.execute(f"SELECT id,window_start,external_recipients FROM {self._table} WHERE key='organization' FOR UPDATE")
+        row = self.env.cr.fetchone()
+        record = self.browse(row[0])
+        if row[1] != window_start:
+            record.write({"window_start": window_start, "external_recipients": {}})
+        else:
+            record.external_recipients = row[2] or {}
+        return record
 
 
 class EmailRateQueue(models.Model):
@@ -78,102 +114,41 @@ class EmailRateQueue(models.Model):
     mail_id = fields.Many2one("mail.mail", required=True, ondelete="cascade", index=True)
     mail_server_id = fields.Many2one("ir.mail_server", required=True, index=True)
     priority = fields.Integer(default=10)
-    state = fields.Selection(
-        [("pending", "Pending"), ("processing", "Processing"), ("done", "Done"), ("failed", "Failed")],
-        default="pending",
-        index=True,
-    )
+    state = fields.Selection([("pending", "Pending"), ("processing", "Processing"), ("done", "Done"), ("failed", "Failed")], default="pending", index=True)
     scheduled_at = fields.Datetime(default=fields.Datetime.now, index=True)
     retry_count = fields.Integer(default=0)
     fallback_used = fields.Boolean(default=False)
     error_message = fields.Text()
 
-    _sql_constraints = [
-        ("mail_unique", "unique(mail_id)", "An email can only have one instant queue item."),
-    ]
+    _sql_constraints = [("mail_unique", "unique(mail_id)", "An email can only have one instant queue item.")]
 
     @api.model
     def enqueue(self, mail, mail_server=None, priority=10):
-        server = mail_server
-        if not server:
-            if mail.mail_server_id:
-                server = mail.mail_server_id
-            else:
-                groups = list(mail._split_by_mail_configuration())
-                if groups:
-                    server = self.env["ir.mail_server"].browse(groups[0][0])
+        server = mail_server or mail.mail_server_id
         if not server:
             raise UserError("An outgoing mail server is required for the instant email queue.")
-
         existing = self.search([("mail_id", "=", mail.id)], limit=1)
-        if existing:
-            return existing
-        return self.create({
-            "mail_id": mail.id,
-            "mail_server_id": server.id,
-            "priority": priority,
-        })
+        return existing or self.create({"mail_id": mail.id, "mail_server_id": server.id, "priority": priority})
 
     @api.model
     def _cron_process(self):
         now = fields.Datetime.now()
-        items = self.search([
-            ("state", "=", "pending"),
-            ("scheduled_at", "<=", now),
-        ], order="priority desc, scheduled_at, id", limit=100)
-        for item in items:
+        for item in self.search([("state", "=", "pending"), ("scheduled_at", "<=", now)], order="priority desc, scheduled_at, id", limit=100):
             item._process_one()
 
     def _process_one(self):
         self.ensure_one()
-        if self.state != "pending":
+        if self.state != "pending" or not self.mail_id.exists():
+            self.write({"state": "done"})
             return
-        self.state = "processing"
+        self.write({"state": "processing"})
         try:
-            allowed, delayed = self.mail_id._rate_limit_send()
-            if not allowed:
-                next_at = delayed[:1].scheduled_date if delayed else fields.Datetime.now() + timedelta(minutes=1)
-                self.write({"state": "pending", "scheduled_at": next_at})
-                return
-
-            self.mail_id.with_context(
-                rate_limit_background=True,
-                rate_limit_already_reserved=True,
-            ).send(
-                auto_commit=False,
-                raise_exception=True,
-            )
-            self.write({"state": "done", "error_message": False})
+            self.mail_id.send(auto_commit=False, raise_exception=True)
+            if not self.mail_id.exists() or self.mail_id.state == "sent":
+                self.write({"state": "done", "error_message": False})
+            elif self.mail_id.state == "outgoing":
+                self.write({"state": "pending", "scheduled_at": self.mail_id.scheduled_date or fields.Datetime.now() + timedelta(minutes=1)})
+            else:
+                self.write({"state": "failed", "error_message": self.mail_id.failure_reason})
         except Exception as exc:
-            self._handle_send_error(exc)
-
-    def _handle_send_error(self, exc):
-        self.ensure_one()
-        message = str(exc)
-        rate_limited = any(token in message.lower() for token in (
-            "frequency limited", "rate limit", "too many requests", "429",
-        ))
-        if rate_limited:
-            if self.retry_count < self.mail_server_id.rate_limit_max_retries:
-                self.write({
-                    "state": "pending",
-                    "retry_count": self.retry_count + 1,
-                    "scheduled_at": fields.Datetime.now() + timedelta(
-                        seconds=max(self.mail_server_id.rate_limit_retry_delay, 1)
-                    ),
-                    "error_message": message,
-                })
-                return
-            fallback = self.mail_server_id.fallback_server_id if self.mail_server_id.fallback_enabled else False
-            if fallback and not self.fallback_used:
-                self.write({
-                    "state": "pending",
-                    "mail_server_id": fallback.id,
-                    "fallback_used": True,
-                    "retry_count": 0,
-                    "scheduled_at": fields.Datetime.now(),
-                    "error_message": message,
-                })
-                self.mail_id.write({"mail_server_id": fallback.id, "state": "outgoing"})
-                return
-        self.write({"state": "failed", "error_message": message})
+            self.write({"state": "failed", "error_message": str(exc)})

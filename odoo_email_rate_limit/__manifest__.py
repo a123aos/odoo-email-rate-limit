@@ -1,8 +1,8 @@
 {
     "name": "Email Rate Limit",
-    "version": "19.0.1.0.0",
+    "version": "19.0.2.0.0",
     "category": "Discuss/Email",
-    "summary": "Rate-limit outgoing email with instant queue and fallback",
+    "summary": "Lark-compatible email rate limits, sender pools and delayed queue",
     "depends": ["mail"],
     "data": [
         "security/ir.model.access.csv",
@@ -10,7 +10,7 @@
         "views/email_queue_views.xml",
         "data/ir_cron.xml",
     ],
-    "installable": True,
-    "application": False,
+    "installable": true,
+    "application": false,
     "license": "LGPL-3",
 }

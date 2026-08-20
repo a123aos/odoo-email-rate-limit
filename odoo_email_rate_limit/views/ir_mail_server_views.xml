@@ -6,10 +6,17 @@
         <field name="inherit_id" ref="base.ir_mail_server_form"/>
         <field name="arch" type="xml">
             <xpath expr="//field[@name='sequence']" position="after">
-                <separator string="Email Rate Limit"/>
+                <separator string="Email Rate Limit / Lark"/>
                 <field name="rate_limit_enabled"/>
                 <field name="rate_limit_count" invisible="not rate_limit_enabled"/>
                 <field name="rate_limit_window" invisible="not rate_limit_enabled"/>
+                <field name="rate_limit_external_count" invisible="not rate_limit_enabled"/>
+                <field name="rate_limit_org_external_count" invisible="not rate_limit_enabled"/>
+                <field name="rate_limit_internal_domains" invisible="not rate_limit_enabled"/>
+                <separator string="Sender Pool"/>
+                <field name="sender_pool"/>
+                <field name="sender_pool_sequence" invisible="sender_pool == 'none'"/>
+                <separator string="Fallback"/>
                 <field name="fallback_enabled"/>
                 <field name="fallback_server_id" invisible="not fallback_enabled"/>
                 <field name="rate_limit_retry_delay" invisible="not fallback_enabled"/>
