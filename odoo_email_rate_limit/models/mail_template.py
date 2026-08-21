@@ -1,8 +1,83 @@
-from odoo import models
+from odoo import api, fields, models
 
 
 class MailTemplate(models.Model):
     _inherit = "mail.template"
+
+    rate_limit_sender = fields.Selection(
+        selection="_rate_limit_sender_selection",
+        string="Outgoing Mail Server",
+        compute="_compute_rate_limit_sender",
+        inverse="_inverse_rate_limit_sender",
+        store=True,
+        readonly=False,
+        help="Select a fixed outgoing server or a sender pool. Pool members are selected automatically.",
+    )
+
+    @api.model
+    def _rate_limit_sender_selection(self):
+        """Return fixed servers followed by the configured sender pools."""
+        MailServer = self.env["ir.mail_server"].sudo()
+        choices = []
+
+        # Servers which are not assigned to a pool remain directly selectable.
+        for server in MailServer.search(
+            [("sender_pool", "=", "none"), ("active", "=", True)],
+            order="sequence, id",
+        ):
+            choices.append((f"server:{server.id}", server.name))
+
+        pools = dict(self.env["ir.mail_server"]._fields["sender_pool"].selection)
+        for pool in ("order", "signup"):
+            if MailServer.search_count(
+                [("sender_pool", "=", pool), ("active", "=", True)]
+            ):
+                choices.append((f"pool:{pool}", pools.get(pool, pool)))
+
+        return choices
+
+    @api.depends("mail_server_id")
+    def _compute_rate_limit_sender(self):
+        for template in self:
+            server = template.mail_server_id
+            if server and server.sender_pool != "none":
+                template.rate_limit_sender = f"pool:{server.sender_pool}"
+            elif server:
+                template.rate_limit_sender = f"server:{server.id}"
+            else:
+                template.rate_limit_sender = False
+
+    def _inverse_rate_limit_sender(self):
+        MailServer = self.env["ir.mail_server"].sudo()
+        for template in self:
+            value = template.rate_limit_sender
+            if not value:
+                template.mail_server_id = False
+                continue
+
+            kind, key = value.split(":", 1)
+            if kind == "server":
+                server = MailServer.browse(int(key)).exists()
+                if not server or not server.active or server.sender_pool != "none":
+                    raise ValueError("The selected outgoing mail server is no longer available.")
+                template.mail_server_id = server.id
+                continue
+
+            if kind == "pool":
+                servers = MailServer.search(
+                    [("sender_pool", "=", key), ("active", "=", True)],
+                    order="sender_pool_sequence, id",
+                    limit=1,
+                )
+                if not servers:
+                    raise ValueError("The selected sender pool has no active outgoing mail server.")
+                # mail_server_id is kept as the pool's representative member so
+                # Odoo's native template generation still supplies a server id.
+                # mail.mail then performs the actual round-robin selection.
+                template.mail_server_id = servers.id
+                continue
+
+            raise ValueError("Invalid outgoing mail server selection.")
 
     def send_mail(self, res_id, force_send=False, raise_exception=False, email_values=None, email_layout_xmlid=False):
         """Turn template force-send into an item in the dedicated instant queue.
