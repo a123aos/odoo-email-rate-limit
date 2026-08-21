@@ -1,6 +1,6 @@
 {
     "name": "Email Rate Limit",
-    "version": "19.0.2.1.3",
+    "version": "19.0.2.1.4",
     "category": "Discuss/Email",
     "summary": "Lark-compatible email rate limits, sender pools and delayed queue",
     "depends": ["mail"],
@@ -16,6 +16,8 @@
         "web.assets_backend": [
             "odoo_email_rate_limit/static/src/js/rate_limit_dashboard.js",
             "odoo_email_rate_limit/static/src/xml/rate_limit_dashboard.xml",
+            "odoo_email_rate_limit/static/src/js/rate_limit_sender_selection.js",
+            "odoo_email_rate_limit/static/src/xml/rate_limit_sender_selection.xml",
         ],
     },
     "installable": True,
