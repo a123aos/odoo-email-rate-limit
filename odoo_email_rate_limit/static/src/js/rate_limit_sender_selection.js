@@ -6,6 +6,8 @@ import { SelectionField, selectionField } from "@web/views/fields/selection/sele
 import { registry } from "@web/core/registry";
 
 export class RateLimitSenderSelectionField extends SelectionField {
+    static template = "odoo_email_rate_limit.RateLimitSenderSelectionField";
+
     setup() {
         super.setup();
         this.orm = useService("orm");
