@@ -9,19 +9,18 @@ class MailTemplate(models.Model):
         string="Outgoing Mail Server",
         compute="_compute_rate_limit_sender",
         inverse="_inverse_rate_limit_sender",
-        store=True,
         readonly=False,
         help="Select a fixed outgoing server or a sender pool. Pool members are selected automatically.",
     )
 
     @api.model
     def _rate_limit_sender_selection(self):
-        """Return fixed servers followed by the configured sender pools."""
+        """Return current fixed servers followed by the configured sender pools."""
         MailServer = self.env["ir.mail_server"].sudo()
         choices = []
 
-        # Servers which are not assigned to a pool remain directly selectable.
-        # Include False for servers created before sender_pool was introduced.
+        # A server is fixed/directly selectable when it is not assigned to a pool.
+        # False is included for servers created before sender_pool was introduced.
         for server in MailServer.search(
             [
                 ("active", "=", True),
@@ -33,11 +32,7 @@ class MailTemplate(models.Model):
         ):
             choices.append((f"server:{server.id}", server.name))
 
-        pool_labels = {
-            "order": "Order Pool",
-            "signup": "Signup Pool",
-        }
-        for pool, label in pool_labels.items():
+        for pool, label in (("order", "Order Pool"), ("signup", "Signup Pool")):
             if MailServer.search_count(
                 [("sender_pool", "=", pool), ("active", "=", True)]
             ):
@@ -45,16 +40,23 @@ class MailTemplate(models.Model):
 
         return choices
 
-    @api.depends("mail_server_id")
+    @api.depends("mail_server_id", "mail_server_id.sender_pool", "mail_server_id.active", "mail_server_id.name")
     def _compute_rate_limit_sender(self):
+        """Always reflect the current server/pool assignment.
+
+        This field intentionally is not stored. If an outgoing server is changed
+        from a pool member to Fixed / No Pool (or vice versa), every template using
+        that server immediately reflects the new choice without requiring a manual
+        recomputation of stored values.
+        """
         for template in self:
             server = template.mail_server_id
-            if server and server.sender_pool in ("order", "signup"):
-                template.rate_limit_sender = f"pool:{server.sender_pool}"
-            elif server:
-                template.rate_limit_sender = f"server:{server.id}"
-            else:
+            if not server or not server.active:
                 template.rate_limit_sender = False
+            elif server.sender_pool in ("order", "signup"):
+                template.rate_limit_sender = f"pool:{server.sender_pool}"
+            else:
+                template.rate_limit_sender = f"server:{server.id}"
 
     def _inverse_rate_limit_sender(self):
         MailServer = self.env["ir.mail_server"].sudo()
@@ -84,9 +86,9 @@ class MailTemplate(models.Model):
                 )
                 if not servers:
                     raise ValueError("The selected sender pool has no active outgoing mail server.")
-                # Keep a pool member in Odoo's native mail_server_id so template
-                # generation continues to provide a valid server to mail.mail.
-                # mail.mail then performs the actual round-robin selection.
+                # Keep one pool member in Odoo's native mail_server_id so the
+                # generated mail always has a valid outgoing server. mail.mail
+                # subsequently performs the actual round-robin selection.
                 template.mail_server_id = servers.id
                 continue
 
