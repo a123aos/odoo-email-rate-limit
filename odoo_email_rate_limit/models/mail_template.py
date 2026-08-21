@@ -27,12 +27,15 @@ class MailTemplate(models.Model):
         ):
             choices.append((f"server:{server.id}", server.name))
 
-        pools = dict(self.env["ir.mail_server"]._fields["sender_pool"].selection)
-        for pool in ("order", "signup"):
+        pool_labels = {
+            "order": "Order Pool",
+            "signup": "Signup Pool",
+        }
+        for pool, label in pool_labels.items():
             if MailServer.search_count(
                 [("sender_pool", "=", pool), ("active", "=", True)]
             ):
-                choices.append((f"pool:{pool}", pools.get(pool, pool)))
+                choices.append((f"pool:{pool}", label))
 
         return choices
 
@@ -71,8 +74,8 @@ class MailTemplate(models.Model):
                 )
                 if not servers:
                     raise ValueError("The selected sender pool has no active outgoing mail server.")
-                # mail_server_id is kept as the pool's representative member so
-                # Odoo's native template generation still supplies a server id.
+                # Keep a pool member in Odoo's native mail_server_id so template
+                # generation continues to provide a valid server to mail.mail.
                 # mail.mail then performs the actual round-robin selection.
                 template.mail_server_id = servers.id
                 continue
