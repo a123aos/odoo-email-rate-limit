@@ -1,6 +1,6 @@
 {
     "name": "Email Rate Limit",
-    "version": "19.0.2.1.2",
+    "version": "19.0.2.1.3",
     "category": "Discuss/Email",
     "summary": "Lark-compatible email rate limits, sender pools and delayed queue",
     "depends": ["mail"],
@@ -9,6 +9,7 @@
         "views/ir_mail_server_views.xml",
         "views/email_queue_views.xml",
         "views/rate_limit_dashboard_action.xml",
+        "views/mail_template_views.xml",
         "data/ir_cron.xml",
     ],
     "assets": {
