@@ -42,8 +42,14 @@ class EmailRateLimitState(models.Model):
         window = max(server.rate_limit_window, 1)
         window_start = self._window_start(window)
         table = self._table
-        self.env.cr.execute(f"INSERT INTO {table} (mail_server_id,window_start,sent_count,external_recipients,create_uid,create_date,write_uid,write_date) VALUES (%s,%s,0,%s,%s,NOW(),%s,NOW()) ON CONFLICT (mail_server_id) DO NOTHING", (server.id, window_start, "{}", self.env.uid, self.env.uid))
-        self.env.cr.execute(f"SELECT id,window_start,sent_count,external_recipients FROM {table} WHERE mail_server_id=%s FOR UPDATE", (server.id,))
+        self.env.cr.execute(
+            f"INSERT INTO {table} (mail_server_id,window_start,sent_count,external_recipients,create_uid,create_date,write_uid,write_date) VALUES (%s,%s,0,%s,%s,NOW(),%s,NOW()) ON CONFLICT (mail_server_id) DO NOTHING",
+            (server.id, window_start, "{}", self.env.uid, self.env.uid),
+        )
+        self.env.cr.execute(
+            f"SELECT id,window_start,sent_count,external_recipients FROM {table} WHERE mail_server_id=%s FOR UPDATE",
+            (server.id,),
+        )
         row = self.env.cr.fetchone()
         if not row:
             raise UserError("Unable to initialize the email rate-limit state.")
@@ -55,9 +61,16 @@ class EmailRateLimitState(models.Model):
         external = self._external_recipients(server, recipients or [])
         sender_seen = set(sender_json.keys())
         new_sender_external = external - sender_seen
+
         org = self.env["email.rate.limit.org.state"].sudo()._lock(window_start)
-        org_seen = set((org.external_recipients or {}).keys())
+        org_data = org.external_recipients or {}
+        # JSON fields are stored as mappings. Be defensive about old/corrupt
+        # values so one malformed state cannot break the entire mail send path.
+        if not isinstance(org_data, dict):
+            org_data = {email: True for email in org_data} if isinstance(org_data, (list, tuple, set)) else {}
+        org_seen = set(org_data.keys())
         new_org_external = external - org_seen
+
         sender_limit = max(server.rate_limit_external_count, 0)
         org_limit = max(server.rate_limit_org_external_count, 0)
         sender_ok = sent_count + count <= max(server.rate_limit_count, 0)
@@ -65,8 +78,11 @@ class EmailRateLimitState(models.Model):
         org_external_ok = len(org_seen) + len(new_org_external) <= org_limit if org_limit else True
         if sender_ok and sender_external_ok and org_external_ok:
             sender_json.update({email: True for email in new_sender_external})
-            self.env.cr.execute(f"UPDATE {table} SET window_start=%s,sent_count=%s,external_recipients=%s,write_uid=%s,write_date=NOW() WHERE id=%s", (window_start, sent_count + count, json.dumps(sender_json), self.env.uid, state_id))
-            org.external_recipients = {**org_seen, **{email: True for email in new_org_external}}
+            self.env.cr.execute(
+                f"UPDATE {table} SET window_start=%s,sent_count=%s,external_recipients=%s,write_uid=%s,write_date=NOW() WHERE id=%s",
+                (window_start, sent_count + count, json.dumps(sender_json), self.env.uid, state_id),
+            )
+            org.external_recipients = {**org_data, **{email: True for email in new_org_external}}
             return True, None
         return False, fields.Datetime.to_string(window_start + timedelta(seconds=window))
 
@@ -82,32 +98,49 @@ class EmailRateLimitOrgState(models.Model):
 
     @api.model
     def _lock(self, window_start):
-        self.env.cr.execute(f"INSERT INTO {self._table} (key,window_start,external_recipients,create_uid,create_date,write_uid,write_date) VALUES ('organization',%s,%s,%s,NOW(),%s,NOW()) ON CONFLICT (key) DO NOTHING", (window_start, "{}", self.env.uid, self.env.uid))
-        self.env.cr.execute(f"SELECT id,window_start,external_recipients FROM {self._table} WHERE key='organization' FOR UPDATE")
+        self.env.cr.execute(
+            f"INSERT INTO {self._table} (key,window_start,external_recipients,create_uid,create_date,write_uid,write_date) VALUES ('organization',%s,%s,%s,NOW(),%s,NOW()) ON CONFLICT (key) DO NOTHING",
+            (window_start, "{}", self.env.uid, self.env.uid),
+        )
+        self.env.cr.execute(
+            f"SELECT id,window_start,external_recipients FROM {self._table} WHERE key='organization' FOR UPDATE"
+        )
         row = self.env.cr.fetchone()
         record = self.browse(row[0])
         if row[1] != window_start:
             record.write({"window_start": window_start, "external_recipients": {}})
         else:
-            record.external_recipients = row[2] or {}
+            data = row[2] or {}
+            if isinstance(data, dict):
+                record.external_recipients = data
+            elif isinstance(data, (list, tuple, set)):
+                record.external_recipients = {email: True for email in data}
+            else:
+                record.external_recipients = {}
         return record
 
     @api.model
     def get_dashboard_status(self):
-        State = self.env["email.rate.limit.state"].sudo()
-        servers = self.env["ir.mail_server"].sudo().search([("active", "=", True), ("rate_limit_enabled", "=", True)])
+        Server = self.env["ir.mail_server"].sudo()
+        servers = Server.search([("active", "=", True), ("rate_limit_enabled", "=", True)])
         if not servers:
             return {"enabled": False, "count": 0, "limit": 0, "remaining": 0, "percent": 0, "reset_at": False}
 
-        # Lark resets its daily quota at 00:00 UTC. The rate-limit state owns
-        # the canonical UTC window calculation, so the dashboard must use it too.
+        # Lark resets its daily quota at 00:00 UTC. Keep the dashboard aligned
+        # with the same canonical window calculation used by reserve().
         window = max(max(servers.mapped("rate_limit_window") or [86400]), 1)
-        start = State._window_start(window)
-        state = self.sudo().search([("key", "=", "organization")], limit=1)
+        start = self.env["email.rate.limit.state"].sudo()._window_start(window)
+        state = self.search([("key", "=", "organization")], limit=1)
         current = bool(state and state.window_start == start)
-        count = len(state.external_recipients or {}) if current else 0
+        data = state.external_recipients or {} if current else {}
+        if not isinstance(data, dict):
+            data = {email: True for email in data} if isinstance(data, (list, tuple, set)) else {}
+        count = len(data)
         limit = max(max(servers.mapped("rate_limit_org_external_count") or [500]), 0)
-        reset_at = datetime.fromtimestamp(start.replace(tzinfo=timezone.utc).timestamp() + window, tz=timezone.utc)
+        reset_at = datetime.fromtimestamp(
+            start.replace(tzinfo=timezone.utc).timestamp() + window,
+            tz=timezone.utc,
+        )
         return {
             "enabled": True,
             "count": count,
