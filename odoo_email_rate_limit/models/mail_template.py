@@ -19,8 +19,6 @@ class MailTemplate(models.Model):
         MailServer = self.env["ir.mail_server"].sudo()
         choices = []
 
-        # A server is fixed/directly selectable when it is not assigned to a pool.
-        # False is included for servers created before sender_pool was introduced.
         for server in MailServer.search(
             [
                 ("active", "=", True),
@@ -40,15 +38,18 @@ class MailTemplate(models.Model):
 
         return choices
 
+    @api.model
+    def get_rate_limit_sender_selection(self):
+        """Return fresh sender choices for the Template dropdown.
+
+        This is intentionally a public RPC method because the backend Selection
+        metadata is loaded with the form and is not refreshed merely because an
+        ir.mail_server was changed in another form.
+        """
+        return self._rate_limit_sender_selection()
+
     @api.depends("mail_server_id", "mail_server_id.sender_pool", "mail_server_id.active", "mail_server_id.name")
     def _compute_rate_limit_sender(self):
-        """Always reflect the current server/pool assignment.
-
-        This field intentionally is not stored. If an outgoing server is changed
-        from a pool member to Fixed / No Pool (or vice versa), every template using
-        that server immediately reflects the new choice without requiring a manual
-        recomputation of stored values.
-        """
         for template in self:
             server = template.mail_server_id
             if not server or not server.active:
@@ -86,9 +87,6 @@ class MailTemplate(models.Model):
                 )
                 if not servers:
                     raise ValueError("The selected sender pool has no active outgoing mail server.")
-                # Keep one pool member in Odoo's native mail_server_id so the
-                # generated mail always has a valid outgoing server. mail.mail
-                # subsequently performs the actual round-robin selection.
                 template.mail_server_id = servers.id
                 continue
 
