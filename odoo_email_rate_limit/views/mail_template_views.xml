@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="mail_template_form_rate_limit_sender" model="ir.ui.view">
+        <field name="name">mail.template.form.rate.limit.sender</field>
+        <field name="model">mail.template</field>
+        <field name="inherit_id" ref="mail.email_template_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='mail_server_id']" position="replace">
+                <field name="mail_server_id" invisible="1"/>
+                <field name="rate_limit_sender" placeholder="By order of server priority"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
