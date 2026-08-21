@@ -15,8 +15,8 @@ export class RateLimitSenderSelectionField extends SelectionField {
     }
 
     get options() {
-        if (this.props.name === "rate_limit_sender" && this.rateLimitState.choices) {
-            return this.rateLimitState.choices.filter((option) => option[1] !== "");
+        if (this.props.name === "rate_limit_sender" && this.rateLimitState.choices !== null) {
+            return this.rateLimitState.choices;
         }
         return super.options;
     }
@@ -25,11 +25,12 @@ export class RateLimitSenderSelectionField extends SelectionField {
         if (this.props.name !== "rate_limit_sender") {
             return;
         }
-        this.rateLimitState.choices = await this.orm.call(
+        const choices = await this.orm.call(
             "mail.template",
             "get_rate_limit_sender_selection",
             []
         );
+        this.rateLimitState.choices = choices;
     }
 
     async onSenderDropdownOpened() {
