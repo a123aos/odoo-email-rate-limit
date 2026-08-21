@@ -7,7 +7,11 @@
         <field name="arch" type="xml">
             <xpath expr="//field[@name='mail_server_id']" position="replace">
                 <field name="mail_server_id" invisible="1"/>
-                <field name="rate_limit_sender" placeholder="By order of server priority"/>
+                <field
+                    name="rate_limit_sender"
+                    widget="rate_limit_sender"
+                    placeholder="By order of server priority"
+                />
             </xpath>
         </field>
     </record>
