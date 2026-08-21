@@ -21,8 +21,14 @@ class MailTemplate(models.Model):
         choices = []
 
         # Servers which are not assigned to a pool remain directly selectable.
+        # Include False for servers created before sender_pool was introduced.
         for server in MailServer.search(
-            [("sender_pool", "=", "none"), ("active", "=", True)],
+            [
+                ("active", "=", True),
+                "|",
+                ("sender_pool", "=", "none"),
+                ("sender_pool", "=", False),
+            ],
             order="sequence, id",
         ):
             choices.append((f"server:{server.id}", server.name))
@@ -43,7 +49,7 @@ class MailTemplate(models.Model):
     def _compute_rate_limit_sender(self):
         for template in self:
             server = template.mail_server_id
-            if server and server.sender_pool != "none":
+            if server and server.sender_pool in ("order", "signup"):
                 template.rate_limit_sender = f"pool:{server.sender_pool}"
             elif server:
                 template.rate_limit_sender = f"server:{server.id}"
@@ -61,7 +67,11 @@ class MailTemplate(models.Model):
             kind, key = value.split(":", 1)
             if kind == "server":
                 server = MailServer.browse(int(key)).exists()
-                if not server or not server.active or server.sender_pool != "none":
+                if (
+                    not server
+                    or not server.active
+                    or server.sender_pool not in ("none", False)
+                ):
                     raise ValueError("The selected outgoing mail server is no longer available.")
                 template.mail_server_id = server.id
                 continue
