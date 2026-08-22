@@ -15,130 +15,117 @@ class MailMail(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        """Resolve the sender once, before mail.mail records are created.
+        """Resolve sender affinity once while creating mail.mail records.
 
-        Daily customer affinity rules:
+        Daily rules:
 
-        * A customer who signs up today gets one sender from the signup pool.
-          All signup/order/invoice/delivery emails for that customer today use
-          that same sender.
-        * If the customer did not sign up today, the first order transaction
-          today gets one sender from the order pool. Today's order/invoice/
-          delivery emails then reuse that sender.
-        * Reset-password emails are intentionally outside this affinity flow;
-          their template should use a fixed outgoing server, not a sender pool.
+        * Signup today: allocate one sender from the signup pool per customer.
+          All signup, order, invoice and delivery mails for that customer today
+          reuse that sender.
+        * No signup today: the first order/invoice/delivery mail allocates one
+          sender from the order pool; all such mails for that customer today
+          reuse it.
+        * Reset-password and other fixed-server mails are untouched.
 
-        Sender selection is done per customer/user, not per email. The chosen
-        server, From and Reply-To are placed directly into create values so the
-        send path does not need sender-selection writes.
+        Pool rotation is per customer/user, not per email. Sender, From and
+        Reply-To are written into the create values once; the send path never
+        needs to rewrite them.
         """
         today = fields.Date.context_today(self)
-        partner_cache = {}
-        pending_by_pool = {"signup": [], "order": []}
-        affinity_to_remember = {}
+        partner_by_vals = {id(vals): self._partner_from_values(
+            vals.get("model"), vals.get("res_id"), vals.get("recipient_ids")
+        ) for vals in vals_list}
+
+        # Pool requests waiting for one sender per unique customer.
+        pending = {"signup": {}, "order": {}}
+        assignments = {}
 
         for vals in vals_list:
-            partner = self._partner_from_values(
-                vals.get("model"), vals.get("res_id"), vals.get("recipient_ids")
-            )
-            partner_cache[id(vals)] = partner
+            partner = partner_by_vals[id(vals)]
+            model = vals.get("model")
+            server = self._server_from_values(vals)
 
-            server_id = vals.get("mail_server_id")
-            server = (
-                self.env["ir.mail_server"].browse(server_id).exists()
-                if server_id
-                else self.env["ir.mail_server"].browse()
-            )
-            if not server or server.sender_pool not in ("signup", "order"):
+            # Signup is identified by its explicitly configured signup-pool
+            # server. Fixed res.users mails (e.g. reset password) are ignored.
+            if server and server.sender_pool == "signup":
+                pool = "signup"
+            elif model in self._AFFINITY_MODELS:
+                pool = "order"
+            else:
                 continue
 
-            requested_pool = server.sender_pool
             if not partner:
-                pending_by_pool[requested_pool].append(vals)
+                # No customer identity means there is no daily affinity to
+                # persist. Still select a pool sender for this individual mail.
+                pending[pool][None] = pending[pool].get(None, []) + [vals]
                 continue
 
-            # Signup is the daily anchor. Once a customer has signed up today,
-            # every transactional mail today must use that signup sender.
             signup_sender = self._remembered_customer_sender(partner, today, "signup")
+            order_sender = self._remembered_customer_sender(partner, today, "order")
 
-            if requested_pool == "signup":
+            if pool == "signup":
                 selected = signup_sender
-                if not selected:
-                    pending_by_pool["signup"].append(vals)
-                else:
-                    self._apply_sender_values(vals, selected)
-                    affinity_to_remember[("signup", partner.id)] = selected
-                continue
-
-            # Order-pool templates (SO / Invoice / Delivery / payment) first
-            # inherit today's signup sender. Only customers without a signup
-            # affinity today use the order pool.
-            if requested_pool == "order":
-                selected = signup_sender or self._remembered_customer_sender(
-                    partner, today, "order"
-                )
                 if selected:
                     self._apply_sender_values(vals, selected)
-                    pool_key = "signup" if signup_sender else "order"
-                    affinity_to_remember[(pool_key, partner.id)] = selected
+                    assignments[("signup", partner.id)] = selected
                 else:
-                    pending_by_pool["order"].append(vals)
-
-        # Allocate senders once per unique customer/user in each pool. This is
-        # user-based round-robin: 10 emails for one customer consume one pool
-        # slot, not 10 pool slots.
-        for pool, pending_vals in pending_by_pool.items():
-            if not pending_vals:
+                    pending["signup"].setdefault(partner.id, []).append(vals)
                 continue
 
-            groups = {}
-            ungrouped = []
-            for vals in pending_vals:
-                partner = partner_cache.get(id(vals))
-                if partner:
-                    groups.setdefault(partner.id, partner)
-                else:
-                    ungrouped.append(vals)
+            # Transactional mail always prefers today's signup affinity.
+            selected = signup_sender or order_sender
+            if selected:
+                self._apply_sender_values(vals, selected)
+                assignments[("signup" if signup_sender else "order", partner.id)] = selected
+            else:
+                pending["order"].setdefault(partner.id, []).append(vals)
 
-            needed = len(groups) + len(ungrouped)
-            selected_servers = self.env["ir.mail_server"]._select_sender_servers(
-                pool, needed
+        # Allocate one sender per unique customer in each pool. Ten emails for
+        # one customer consume one pool slot, not ten slots.
+        for pool in ("signup", "order"):
+            groups = pending[pool]
+            if not groups:
+                continue
+
+            partner_ids = [pid for pid in groups if pid is not None]
+            anonymous = groups.get(None, [])
+            selected_servers = iter(
+                self.env["ir.mail_server"]._select_sender_servers(
+                    pool, len(partner_ids) + len(anonymous)
+                )
             )
-            selected_iter = iter(selected_servers)
 
-            for partner_id in groups:
-                partner = groups[partner_id]
+            for partner_id in partner_ids:
+                partner = self.env["res.partner"].browse(partner_id).exists()
+                if not partner:
+                    continue
 
-                # An order mail may have been queued in the same create() call
-                # after a signup mail for this customer. Re-check the local
-                # assignment before consuming another pool slot.
-                selected = affinity_to_remember.get(("signup", partner_id))
+                # A signup created earlier in the same batch wins over an order
+                # allocation and must not consume an additional order slot.
+                selected = assignments.get(("signup", partner_id))
                 if not selected:
-                    selected = affinity_to_remember.get(("order", partner_id))
-
+                    selected = assignments.get(("order", partner_id))
                 if not selected:
                     try:
-                        selected = next(selected_iter)
+                        selected = next(selected_servers)
                     except StopIteration:
                         selected = False
                     if selected:
-                        affinity_to_remember[(pool, partner_id)] = selected
+                        key = (pool, partner_id)
+                        assignments[key] = selected
 
-                if selected:
-                    for vals in pending_vals:
-                        if partner_cache.get(id(vals)) == partner:
-                            # If the customer signed up today, signup wins even
-                            # when these vals originated from the order pool.
-                            signup_selected = affinity_to_remember.get(
-                                ("signup", partner_id)
-                            )
-                            self._apply_sender_values(
-                                vals, signup_selected or selected
-                            )
+                if not selected:
+                    continue
 
-            for vals in ungrouped:
+                for vals in groups[partner_id]:
+                    # Signup wins even when the pending mail originated from
+                    # an order-pool template.
+                    signup_selected = assignments.get(("signup", partner_id))
+                    self._apply_sender_values(vals, signup_selected or selected)
+
+            for vals in anonymous:
                 try:
-                    selected = next(selected_iter)
+                    selected = next(selected_servers)
                 except StopIteration:
                     selected = False
                 if selected:
@@ -146,12 +133,13 @@ class MailMail(models.Model):
 
         mails = super().create(vals_list)
 
-        # Persist one daily affinity per customer. Signup always wins over an
-        # order affinity for the same customer/date.
-        for (pool, partner_id), selected in affinity_to_remember.items():
-            if not selected:
+        # Persist the daily affinity after successful mail creation. Signup is
+        # always the higher-priority affinity.
+        Partner = self.env["res.partner"]
+        for (pool, partner_id), selected in assignments.items():
+            if not selected or not partner_id:
                 continue
-            partner = self.env["res.partner"].browse(partner_id).exists()
+            partner = Partner.browse(partner_id).exists()
             if not partner:
                 continue
             if pool == "signup":
@@ -159,15 +147,20 @@ class MailMail(models.Model):
                     "signup_sender_id": selected.id,
                     "signup_sender_date": today,
                 })
-            elif pool == "order" and not self._remembered_customer_sender(
-                partner, today, "signup"
-            ):
+            elif not self._remembered_customer_sender(partner, today, "signup"):
                 partner.sudo().write({
                     "order_sender_id": selected.id,
                     "order_sender_date": today,
                 })
 
         return mails
+
+    @api.model
+    def _server_from_values(self, vals):
+        server_id = vals.get("mail_server_id")
+        if not server_id:
+            return self.env["ir.mail_server"].browse()
+        return self.env["ir.mail_server"].browse(server_id).exists()
 
     @api.model
     def _partner_from_values(self, model, res_id, recipient_ids=None):
