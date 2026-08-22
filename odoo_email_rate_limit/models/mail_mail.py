@@ -61,6 +61,9 @@ class MailMail(models.Model):
         template From remains a fallback/display-name source. For existing
         installations that have not populated sender_email yet, an
         email-formatted smtp_user remains a compatibility fallback.
+
+        Reply-To is intentionally kept identical to the final From address so
+        replies always return to the same sender selected by the pool.
         """
         self.ensure_one()
         sender = (server.sender_email or server.smtp_user or "").strip()
@@ -71,8 +74,11 @@ class MailMail(models.Model):
         if not name:
             name = server.name or ""
         email_from = formataddr((name, sender)) if name else sender
-        if self.email_from != email_from:
-            self.with_context(rate_limit_internal=True).write({"email_from": email_from})
+        if self.email_from != email_from or self.reply_to != email_from:
+            self.with_context(rate_limit_internal=True).write({
+                "email_from": email_from,
+                "reply_to": email_from,
+            })
 
     def _sync_pool_sender_before_send(self):
         """Final guard: selected pool server always wins over template From."""
