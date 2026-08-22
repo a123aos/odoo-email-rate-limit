@@ -18,11 +18,7 @@ class MailMail(models.Model):
 
     @api.model
     def _allocate_sender_pool(self, pool_type):
-        """Atomically allocate the next sender in a two-address pool.
-
-        PostgreSQL advisory transaction locks prevent two concurrent Odoo
-        workers from selecting the same sender.
-        """
+        """Atomically allocate the next sender in a two-address pool."""
         if pool_type not in ('signup', 'order'):
             raise ValueError('Unknown sender pool type: %s' % pool_type)
 
@@ -41,10 +37,9 @@ class MailMail(models.Model):
 
     @api.model
     def _get_customer_partner(self, values):
-        """Find the business/customer partner this outgoing mail belongs to."""
+        """Find the customer partner represented by an outgoing mail."""
         recipient_ids = values.get('recipient_ids') or []
         if recipient_ids:
-            # Odoo command format: [(6, 0, [ids])] or [(4, id), ...]
             ids = []
             for command in recipient_ids:
                 if isinstance(command, (list, tuple)) and command:
@@ -74,16 +69,29 @@ class MailMail(models.Model):
         return self.env['res.partner']
 
     @api.model
+    def _is_order_flow_mail(self, values):
+        """Only assign the order pool when the customer enters an order flow."""
+        model = values.get('model')
+        if model == 'sale.order':
+            return True
+        if model == 'stock.picking':
+            record = self.env[model].browse(values.get('res_id')).exists()
+            return bool(record and record.picking_type_code == 'outgoing')
+        if model == 'account.move':
+            record = self.env[model].browse(values.get('res_id')).exists()
+            return bool(record and record.move_type in ('out_invoice', 'out_refund', 'out_receipt'))
+        return False
+
+    @api.model
     def _apply_customer_sender_pool(self, values):
         partner = self._get_customer_partner(values)
         if not partner:
             return values
 
-        # Existing assignment wins forever. A newly purchasing customer gets
-        # the order pool once, and all later order/invoice/delivery emails keep
-        # using that same sender.
         pool = partner.email_sender_pool
         if not pool:
+            if not self._is_order_flow_mail(values):
+                return values
             pool = self._allocate_sender_pool('order')
             partner.sudo().write({'email_sender_pool': pool})
 
@@ -103,9 +111,8 @@ class MailMail(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        # Routing is done before mail.mail is created so the queue records the
-        # final email_from and mail_server_id and Odoo's normal sender grouping
-        # can batch messages correctly.
+        # Route before creation so the queue stores the final sender/server and
+        # Odoo's normal sender grouping can batch messages correctly.
         for values in vals_list:
             try:
                 self._apply_customer_sender_pool(values)
