@@ -11,8 +11,8 @@ class IrMailServer(models.Model):
     rate_limit_enabled = fields.Boolean(string="Enable Rate Limit")
     rate_limit_count = fields.Integer(string="Emails per Reset Period", default=450, help="Maximum emails allowed for this sender during the reset period. For Lark daily limits, the period resets at 00:00 UTC.")
     rate_limit_window = fields.Integer(string="Reset Period (seconds)", default=86400, help="Rate-limit period in seconds. With the default 86400 seconds, the counter is aligned to UTC calendar days and resets at 00:00 UTC (Lark).")
-    rate_limit_external_count = fields.Integer(string="External Recipients per Reset Period", default=200, help="Maximum unique external recipients for this sender during the reset period. With a 86400-second period, resets at 00:00 UTC.")
-    rate_limit_org_external_count = fields.Integer(string="Organization External Recipients per Reset Period", default=500, help="Maximum unique external recipients across the organization during the reset period. With a 86400-second period, resets at 00:00 UTC.")
+    rate_limit_external_count = fields.Integer(string="External Recipients per Reset Period", default=200, help="Maximum unique external recipients for this sender during the reset period. With a 86400-second period, resets to 00:00 UTC.")
+    rate_limit_org_external_count = fields.Integer(string="Organization External Recipients per Reset Period", default=500, help="Maximum unique external recipients across the organization during the reset period. With a 86400-second period, resets to 00:00 UTC.")
     rate_limit_internal_domains = fields.Char(string="Internal Email Domains", default=lambda self: self.env.company.email.split("@", 1)[1].lower() if self.env.company.email and "@" in self.env.company.email else "", help="Comma-separated domains treated as internal.")
     sender_pool = fields.Selection([("none", "Fixed / No Pool"), ("signup", "Signup (Welcome)"), ("order", "Order (SO / Invoice)")], string="Sender Pool", default="none", required=True, help="Servers in the same pool are selected round-robin.")
     sender_pool_sequence = fields.Integer(string="Pool Sequence", default=10)
@@ -29,13 +29,13 @@ class IrMailServer(models.Model):
     def _select_sender_servers(self, pool, count):
         servers = self._sender_pool_servers(pool)
         if not servers or count <= 0:
-            return self.browse()
+            return []
         return EmailSenderPoolState(self.env).select_servers(pool, servers, count)
 
     @api.model
     def _select_sender_from_pool(self, pool):
         selected = self._select_sender_servers(pool, 1)
-        return selected[:1]
+        return selected[0] if selected else self.browse()
 
     @api.model
     def get_rate_limit_dashboard(self):
