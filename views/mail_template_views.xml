@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="mail_template_view_form_sender_pool" model="ir.ui.view">
+        <field name="name">mail.template.form.sender.pool</field>
+        <field name="model">mail.template</field>
+        <field name="inherit_id" ref="mail.email_template_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='mail_server_id']" position="replace">
+                <field name="sender_pool_mode" widget="radio"/>
+                <field name="mail_server_id" invisible="sender_pool_mode != 'server'"/>
+                <field name="sender_pool" invisible="sender_pool_mode != 'pool'" required="sender_pool_mode == 'pool'"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
