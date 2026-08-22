@@ -84,7 +84,21 @@ class MailMail(models.Model):
         return False
 
     @api.model
+    def _get_template_pool(self, values):
+        template_id = values.get('template_id')
+        if not template_id or 'mail.template' not in self.env:
+            return False
+        template = self.env['mail.template'].sudo().browse(template_id).exists()
+        if not template or template.sender_pool_mode != 'pool':
+            return False
+        return template.sender_pool
+
+    @api.model
     def _apply_customer_sender_pool(self, values):
+        template_pool = self._get_template_pool(values)
+        if not template_pool:
+            return values
+
         partner = self._get_customer_partner(values)
         if not partner:
             return values
@@ -93,9 +107,7 @@ class MailMail(models.Model):
         server = partner.email_sender_server_id if partner.email_sender_pool_date == today else self.env['ir.mail_server']
 
         if not server:
-            if not self._is_order_flow_mail(values):
-                return values
-            server = self._allocate_sender_pool('order')
+            server = self._allocate_sender_pool(template_pool)
             partner.sudo().write({
                 'email_sender_server_id': server.id,
                 'email_sender_pool_date': today,
