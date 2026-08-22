@@ -26,11 +26,16 @@ class IrMailServer(models.Model):
         return self.sudo().search([("sender_pool", "=", pool), ("active", "=", True)], order="sender_pool_sequence, id")
 
     @api.model
-    def _select_sender_from_pool(self, pool):
+    def _select_sender_servers(self, pool, count):
         servers = self._sender_pool_servers(pool)
-        if not servers:
+        if not servers or count <= 0:
             return self.browse()
-        return EmailSenderPoolState(self.env).select_server(pool, servers)
+        return EmailSenderPoolState(self.env).select_servers(pool, servers, count)
+
+    @api.model
+    def _select_sender_from_pool(self, pool):
+        selected = self._select_sender_servers(pool, 1)
+        return selected[:1]
 
     @api.model
     def get_rate_limit_dashboard(self):
