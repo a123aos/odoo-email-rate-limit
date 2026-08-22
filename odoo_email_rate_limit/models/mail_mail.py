@@ -55,15 +55,16 @@ class MailMail(models.Model):
         return self.env["ir.mail_server"].browse()
 
     def _set_from_server_sender(self, server):
-        """Use the selected server's SMTP login as the actual From address.
+        """Use the selected server's configured sender address.
 
-        The template's address is only a fallback. This method is deliberately
-        called both when the pool is selected and immediately before SMTP send,
-        because Odoo can rebuild/update mail.mail values after create().
+        ``sender_email`` is the authoritative address for pool servers. The
+        template From remains a fallback/display-name source. For existing
+        installations that have not populated sender_email yet, an
+        email-formatted smtp_user remains a compatibility fallback.
         """
         self.ensure_one()
-        sender = (server.smtp_user or "").strip()
-        if not sender:
+        sender = (server.sender_email or server.smtp_user or "").strip()
+        if not sender or "@" not in sender:
             return
 
         name, _address = parseaddr(self.email_from or "")
@@ -105,8 +106,6 @@ class MailMail(models.Model):
             today = fields.Date.context_today(mail)
             server = mail.mail_server_id
 
-            # Signup itself is the onboarding event, including templates whose
-            # originating model is res.users.
             if server and server.sender_pool == "signup":
                 remembered = self._remembered_customer_sender(partner, today)
                 if remembered and remembered.sender_pool == "signup":
@@ -117,14 +116,10 @@ class MailMail(models.Model):
                     mail._apply_selected_sender(partner, today, selected)
                 continue
 
-            # Password reset and unrelated account/system mail must not inherit
-            # a customer's business sender.
             if not mail._is_customer_affinity_mail():
                 continue
 
-            # A sender already assigned today wins regardless of the current
-            # business template's outgoing-server setting.
-            remembered = mail._remembered_customer_sender(partner, today)
+            remembered = self._remembered_customer_sender(partner, today)
             if remembered:
                 mail.with_context(rate_limit_internal=True).write({"mail_server_id": remembered.id})
                 mail._set_from_server_sender(remembered)
@@ -163,8 +158,6 @@ class MailMail(models.Model):
             else:
                 mail.write({"scheduled_date": next_at, "state": "outgoing"})
         if allowed:
-            # Odoo's send path can update mail fields between create() and SMTP
-            # delivery. Re-apply the selected pool sender at the final boundary.
             allowed._sync_pool_sender_before_send()
             return super(MailMail, allowed).send(
                 auto_commit=auto_commit,
