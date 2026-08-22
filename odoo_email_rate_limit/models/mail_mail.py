@@ -1,3 +1,5 @@
+from email.utils import formataddr, parseaddr
+
 from odoo import api, fields, models, tools
 
 
@@ -35,12 +37,7 @@ class MailMail(models.Model):
         return partner.commercial_partner_id if partner else partner
 
     def _is_customer_affinity_mail(self):
-        """Whether this mail belongs to the business sender-affinity chain.
-
-        Only signup/order-related business documents participate. Unrelated
-        account/system emails (such as password reset) keep Odoo's normal
-        outgoing-server selection and never inherit a customer's pool sender.
-        """
+        """Whether this mail belongs to the business sender-affinity chain."""
         self.ensure_one()
         return self.model in self._AFFINITY_MODELS
 
@@ -61,6 +58,46 @@ class MailMail(models.Model):
 
         return self.env["ir.mail_server"].browse()
 
+    def _set_from_server_sender(self, server):
+        """Keep the template display name but use the selected server address.
+
+        Templates may deliberately contain a fallback such as
+        ``Company <order@aritrz.com>``. Once a pool server has been selected,
+        the actual address must come from that server instead of remaining a
+        fixed template address. No pool address is hard-coded here.
+        """
+        self.ensure_one()
+        sender = server.smtp_user
+        if not sender:
+            return
+
+        name, _address = parseaddr(self.email_from or "")
+        if not name:
+            name = server.name or ""
+        self.with_context(rate_limit_internal=True).write({
+            "email_from": formataddr((name, sender)) if name else sender,
+        })
+
+    def _apply_selected_sender(self, partner, today, selected):
+        if not selected:
+            return
+        self.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
+        self._set_from_server_sender(selected)
+
+        # The sender affinity is stored on the customer so all subsequent
+        # eligible business emails today reuse exactly this server/address.
+        if partner:
+            if selected.sender_pool == "signup":
+                partner.sudo().write({
+                    "signup_sender_id": selected.id,
+                    "signup_sender_date": today,
+                })
+            elif selected.sender_pool == "order":
+                partner.sudo().write({
+                    "order_sender_id": selected.id,
+                    "order_sender_date": today,
+                })
+
     def _apply_sender_pool(self):
         """Resolve sender pools using Customer + day affinity.
 
@@ -69,53 +106,35 @@ class MailMail(models.Model):
         business communication chain reuse it even when their template has no
         outgoing server or uses a different pool setting.
 
-        Unrelated account/system mail is deliberately excluded so, for example,
-        a password-reset email can continue to use account@ instead of inheriting
-        the customer's order sender.
+        Unrelated account/system mail is deliberately excluded.
         """
         for mail in self:
             partner = mail._target_partner()
             today = fields.Date.context_today(mail)
 
-            # No customer-affinity business document: leave Odoo's native
-            # outgoing-server behaviour completely untouched.
             if not mail._is_customer_affinity_mail():
                 continue
 
-            # First priority: an existing sender for this customer today.
-            # This is intentionally checked BEFORE the template/server pool so
-            # all eligible business emails share the same sender for the day.
+            # Existing customer affinity always wins over the current template
+            # selection for the rest of the day.
             remembered = mail._remembered_customer_sender(partner, today)
             if remembered:
                 mail.with_context(rate_limit_internal=True).write({"mail_server_id": remembered.id})
+                mail._set_from_server_sender(remembered)
                 continue
 
             server = mail.mail_server_id
             if not server or server.sender_pool == "none":
-                # No affinity exists and this template is not explicitly tied
-                # to a pool. Keep Odoo's normal server selection.
                 continue
 
             if server.sender_pool == "signup":
                 selected = self.env["ir.mail_server"]._select_sender_from_pool("signup")
-                if selected:
-                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
-                    if partner:
-                        partner.sudo().write({
-                            "signup_sender_id": selected.id,
-                            "signup_sender_date": today,
-                        })
+                mail._apply_selected_sender(partner, today, selected)
                 continue
 
             if server.sender_pool == "order":
                 selected = self.env["ir.mail_server"]._select_sender_from_pool("order")
-                if selected:
-                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
-                    if partner:
-                        partner.sudo().write({
-                            "order_sender_id": selected.id,
-                            "order_sender_date": today,
-                        })
+                mail._apply_selected_sender(partner, today, selected)
 
     def _rate_limit_recipients(self):
         self.ensure_one()
