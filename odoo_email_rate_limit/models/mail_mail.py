@@ -4,6 +4,15 @@ from odoo import api, fields, models, tools
 class MailMail(models.Model):
     _inherit = "mail.mail"
 
+    # Customer sender affinity applies to the commercial/order communication
+    # chain, not to unrelated account/system mail (for example password reset).
+    _AFFINITY_MODELS = {
+        "sale.order",
+        "account.move",
+        "stock.picking",
+        "payment.transaction",
+    }
+
     @api.model_create_multi
     def create(self, vals_list):
         mails = super().create(vals_list)
@@ -18,9 +27,6 @@ class MailMail(models.Model):
             if record:
                 partner = getattr(record, "partner_id", False)
                 if partner:
-                    # Sender affinity is customer-level. Always normalize to
-                    # the commercial partner so SO/invoice/contact records for
-                    # the same customer share the same daily sender.
                     return partner.commercial_partner_id or partner
                 if self.model == "res.users" and record.partner_id:
                     partner = record.partner_id
@@ -28,68 +34,88 @@ class MailMail(models.Model):
         partner = self.recipient_ids[:1]
         return partner.commercial_partner_id if partner else partner
 
-    def _apply_sender_pool(self):
-        """Resolve sender pools with one sender affinity per customer per UTC day.
+    def _is_customer_affinity_mail(self):
+        """Whether this mail belongs to the business sender-affinity chain.
 
-        A pool rotates only when a customer has no sender recorded for the
-        current day. Once selected, all emails using that pool for the same
-        customer on that day reuse the selected server.
+        Only signup/order-related business documents participate. Unrelated
+        account/system emails (such as password reset) keep Odoo's normal
+        outgoing-server selection and never inherit a customer's pool sender.
+        """
+        self.ensure_one()
+        return self.model in self._AFFINITY_MODELS
+
+    def _remembered_customer_sender(self, partner, today):
+        """Return today's signup/order sender for a customer, if any."""
+        if not partner:
+            return self.env["ir.mail_server"].browse()
+
+        if partner.signup_sender_id and partner.signup_sender_date == today:
+            sender = partner.signup_sender_id
+            if sender.active and sender.sender_pool == "signup":
+                return sender
+
+        if partner.order_sender_id and partner.order_sender_date == today:
+            sender = partner.order_sender_id
+            if sender.active and sender.sender_pool == "order":
+                return sender
+
+        return self.env["ir.mail_server"].browse()
+
+    def _apply_sender_pool(self):
+        """Resolve sender pools using Customer + day affinity.
+
+        Signup and Order pools establish the sender affinity. Once a customer
+        has one of those senders for the current day, subsequent emails in the
+        business communication chain reuse it even when their template has no
+        outgoing server or uses a different pool setting.
+
+        Unrelated account/system mail is deliberately excluded so, for example,
+        a password-reset email can continue to use account@ instead of inheriting
+        the customer's order sender.
         """
         for mail in self:
-            server = mail.mail_server_id
-            if not server or server.sender_pool == "none":
-                continue
-
             partner = mail._target_partner()
             today = fields.Date.context_today(mail)
 
-            if server.sender_pool == "signup":
-                selected = False
-                if partner and partner.signup_sender_id and partner.signup_sender_date == today:
-                    remembered = partner.signup_sender_id
-                    if remembered.active and remembered.sender_pool == "signup":
-                        selected = remembered
+            # No customer-affinity business document: leave Odoo's native
+            # outgoing-server behaviour completely untouched.
+            if not mail._is_customer_affinity_mail():
+                continue
 
-                if not selected:
-                    selected = self.env["ir.mail_server"]._select_sender_from_pool("signup")
-                    if selected and partner:
+            # First priority: an existing sender for this customer today.
+            # This is intentionally checked BEFORE the template/server pool so
+            # all eligible business emails share the same sender for the day.
+            remembered = mail._remembered_customer_sender(partner, today)
+            if remembered:
+                mail.with_context(rate_limit_internal=True).write({"mail_server_id": remembered.id})
+                continue
+
+            server = mail.mail_server_id
+            if not server or server.sender_pool == "none":
+                # No affinity exists and this template is not explicitly tied
+                # to a pool. Keep Odoo's normal server selection.
+                continue
+
+            if server.sender_pool == "signup":
+                selected = self.env["ir.mail_server"]._select_sender_from_pool("signup")
+                if selected:
+                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
+                    if partner:
                         partner.sudo().write({
                             "signup_sender_id": selected.id,
                             "signup_sender_date": today,
                         })
-
-                if selected:
-                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
                 continue
 
             if server.sender_pool == "order":
-                selected = False
-
-                # Signup and order/invoice mail for the same customer on the
-                # same UTC day share the exact signup sender when available.
-                if partner and partner.signup_sender_id and partner.signup_sender_date == today:
-                    remembered = partner.signup_sender_id
-                    if remembered.active and remembered.sender_pool == "signup":
-                        selected = remembered
-
-                # Otherwise, reuse this customer's order sender for today.
-                if not selected and partner and partner.order_sender_id and partner.order_sender_date == today:
-                    remembered = partner.order_sender_id
-                    if remembered.active and remembered.sender_pool == "order":
-                        selected = remembered
-
-                # Only a genuinely new customer/day consumes the next order
-                # pool position.
-                if not selected:
-                    selected = self.env["ir.mail_server"]._select_sender_from_pool("order")
-                    if selected and partner:
+                selected = self.env["ir.mail_server"]._select_sender_from_pool("order")
+                if selected:
+                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
+                    if partner:
                         partner.sudo().write({
                             "order_sender_id": selected.id,
                             "order_sender_date": today,
                         })
-
-                if selected:
-                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
 
     def _rate_limit_recipients(self):
         self.ensure_one()
