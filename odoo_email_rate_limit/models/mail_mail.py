@@ -59,13 +59,7 @@ class MailMail(models.Model):
         return self.env["ir.mail_server"].browse()
 
     def _set_from_server_sender(self, server):
-        """Keep the template display name but use the selected server address.
-
-        Templates may deliberately contain a fallback such as
-        ``Company <order@aritrz.com>``. Once a pool server has been selected,
-        the actual address must come from that server instead of remaining a
-        fixed template address. No pool address is hard-coded here.
-        """
+        """Keep the template display name but use the selected server address."""
         self.ensure_one()
         sender = server.smtp_user
         if not sender:
@@ -101,17 +95,40 @@ class MailMail(models.Model):
     def _apply_sender_pool(self):
         """Resolve sender pools using Customer + day affinity.
 
-        Signup and Order pools establish the sender affinity. Once a customer
-        has one of those senders for the current day, subsequent emails in the
-        business communication chain reuse it even when their template has no
-        outgoing server or uses a different pool setting.
+        Signup is the customer onboarding event: every new customer entering
+        the Signup Pool advances the Signup round-robin once and stores that
+        sender on the customer for the day. The signup message is commonly
+        generated from ``res.users``, so Signup must be handled even though
+        ``res.users`` is intentionally not part of the business-mail model
+        allowlist.
+
+        Order Pool works the same way for the first order of a customer. Once
+        either Signup or Order establishes the customer's sender for today,
+        eligible business emails reuse that sender for the rest of the day.
 
         Unrelated account/system mail is deliberately excluded.
         """
         for mail in self:
             partner = mail._target_partner()
             today = fields.Date.context_today(mail)
+            server = mail.mail_server_id
 
+            # A Signup Pool template is itself the onboarding event. Do this
+            # before the business-model allowlist so res.users signup emails
+            # can actually enter the round-robin pool.
+            if server and server.sender_pool == "signup":
+                remembered = mail._remembered_customer_sender(partner, today)
+                if remembered and remembered.sender_pool == "signup":
+                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": remembered.id})
+                    mail._set_from_server_sender(remembered)
+                else:
+                    selected = self.env["ir.mail_server"]._select_sender_from_pool("signup")
+                    mail._apply_selected_sender(partner, today, selected)
+                continue
+
+            # From this point onward only business communication is eligible
+            # for Customer sender affinity. This intentionally excludes things
+            # such as password reset / account emails.
             if not mail._is_customer_affinity_mail():
                 continue
 
@@ -123,13 +140,7 @@ class MailMail(models.Model):
                 mail._set_from_server_sender(remembered)
                 continue
 
-            server = mail.mail_server_id
             if not server or server.sender_pool == "none":
-                continue
-
-            if server.sender_pool == "signup":
-                selected = self.env["ir.mail_server"]._select_sender_from_pool("signup")
-                mail._apply_selected_sender(partner, today, selected)
                 continue
 
             if server.sender_pool == "order":
