@@ -16,6 +16,7 @@
                 <separator string="Sender Pool"/>
                 <field name="sender_pool"/>
                 <field name="sender_pool_sequence" invisible="sender_pool == 'none'"/>
+                <field name="sender_email" invisible="sender_pool == 'none'" placeholder="order1@aritrz.com"/>
                 <separator string="Fallback"/>
                 <field name="fallback_enabled"/>
                 <field name="fallback_server_id" invisible="not fallback_enabled"/>
