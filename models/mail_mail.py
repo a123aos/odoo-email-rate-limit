@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from datetime import datetime, timezone
 
 from odoo import api, models
 
@@ -17,19 +18,26 @@ class MailMail(models.Model):
     }
 
     @api.model
+    def _utc_date(self):
+        return datetime.now(timezone.utc).date()
+
+    @api.model
     def _allocate_sender_pool(self, pool_type):
         """Atomically allocate the next sender in a two-address pool."""
         if pool_type not in ('signup', 'order'):
             raise ValueError('Unknown sender pool type: %s' % pool_type)
-
         icp = self.env['ir.config_parameter'].sudo()
         lock_key = int.from_bytes(
             hashlib.sha256(('odoo_email_sender_pool:%s' % pool_type).encode()).digest()[:8],
             byteorder='big', signed=False,
         ) - (1 << 63)
         self.env.cr.execute('SELECT pg_advisory_xact_lock(%s)', [lock_key])
-
+        date_key = 'odoo_email_rate_limit.%s_counter_date' % pool_type
         counter_key = 'odoo_email_rate_limit.%s_next' % pool_type
+        today = self._utc_date().isoformat()
+        if icp.get_param(date_key) != today:
+            icp.set_param(date_key, today)
+            icp.set_param(counter_key, '1')
         current = int(icp.get_param(counter_key, '1') or '1')
         pool = '%s%d' % (pool_type, 1 if current % 2 else 2)
         icp.set_param(counter_key, '2' if current % 2 else '1')
@@ -37,7 +45,6 @@ class MailMail(models.Model):
 
     @api.model
     def _get_customer_partner(self, values):
-        """Find the customer partner represented by an outgoing mail."""
         recipient_ids = values.get('recipient_ids') or []
         if recipient_ids:
             ids = []
@@ -52,7 +59,6 @@ class MailMail(models.Model):
                 partners = partners.filtered(lambda p: p.email)
                 if partners:
                     return partners[0]
-
         model = values.get('model')
         res_id = values.get('res_id')
         if model and res_id and model in self.env:
@@ -70,7 +76,6 @@ class MailMail(models.Model):
 
     @api.model
     def _is_order_flow_mail(self, values):
-        """Only assign the order pool when the customer enters an order flow."""
         model = values.get('model')
         if model == 'sale.order':
             return True
@@ -88,31 +93,35 @@ class MailMail(models.Model):
         if not partner:
             return values
 
-        pool = partner.email_sender_pool
+        today = self._utc_date()
+        pool = partner.email_sender_pool if partner.email_sender_pool_date == today else False
+
         if not pool:
+            # Same-day signup customers keep their signup sender. Customers
+            # without a valid today assignment enter the order pool only when
+            # an actual order/invoice/delivery flow starts.
             if not self._is_order_flow_mail(values):
                 return values
             pool = self._allocate_sender_pool('order')
-            partner.sudo().write({'email_sender_pool': pool})
+            partner.sudo().write({
+                'email_sender_pool': pool,
+                'email_sender_pool_date': today,
+            })
 
-        email_key, server_key = self._POOL_CONFIG.get(pool, (False, False))
+        email_key, server_key = self._POOL_CONFIG[pool]
         icp = self.env['ir.config_parameter'].sudo()
-        email_from = icp.get_param('odoo_email_rate_limit.%s' % email_key, '') if email_key else ''
-        mail_server_id = int(icp.get_param('odoo_email_rate_limit.%s' % server_key, '0') or 0) if server_key else 0
-
+        email_from = icp.get_param('odoo_email_rate_limit.%s' % email_key, '')
+        mail_server_id = int(icp.get_param('odoo_email_rate_limit.%s' % server_key, '0') or 0)
         if email_from:
             values['email_from'] = email_from.strip()
         if mail_server_id:
             server = self.env['ir.mail_server'].sudo().browse(mail_server_id).exists()
             if server:
                 values['mail_server_id'] = server.id
-
         return values
 
     @api.model_create_multi
     def create(self, vals_list):
-        # Route before creation so the queue stores the final sender/server and
-        # Odoo's normal sender grouping can batch messages correctly.
         for values in vals_list:
             try:
                 self._apply_customer_sender_pool(values)
