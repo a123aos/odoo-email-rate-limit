@@ -19,7 +19,7 @@ class EmailSenderPoolState:
 
     def select_servers(self, pool, servers, count):
         if not servers or count <= 0:
-            return self.env["ir.mail_server"].browse()
+            return []
 
         # Serialize updates for each pool inside the current PostgreSQL
         # transaction. pg_advisory_xact_lock is released automatically when the
@@ -34,9 +34,6 @@ class EmailSenderPoolState:
         except (TypeError, ValueError):
             index = 0
 
-        selected = self.env["ir.mail_server"].browse()
-        for offset in range(count):
-            selected |= servers[(index + offset) % len(servers)]
-
+        selected = [servers[(index + offset) % len(servers)] for offset in range(count)]
         ICP.set_param(key, str((index + count) % len(servers)))
         return selected
