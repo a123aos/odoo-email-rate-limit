@@ -5,56 +5,29 @@
         <field name="model">res.config.settings</field>
         <field name="inherit_id" ref="base.res_config_settings_view_form"/>
         <field name="arch" type="xml">
-            <xpath expr="//div[@id='email']" position="inside">
-                <div class="app_settings_block" data-string="Customer Email Sender Pools" data-key="odoo_email_rate_limit">
-                    <h2>Customer Email Sender Pools</h2>
-                    <div class="row mt16 o_settings_container">
-                        <div class="col-12 col-lg-6 o_setting_box">
-                            <div class="o_setting_left_pane"/>
-                            <div class="o_setting_right_pane">
-                                <label for="signup1_email" string="Signup 1"/>
-                                <div class="text-muted">First new signup customer in the round-robin pool.</div>
-                                <div class="content-group mt16">
-                                    <field name="signup1_email" placeholder="signup1@example.com"/>
-                                    <field name="signup1_mail_server_id" options="{'no_create': True}"/>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-12 col-lg-6 o_setting_box">
-                            <div class="o_setting_left_pane"/>
-                            <div class="o_setting_right_pane">
-                                <label for="signup2_email" string="Signup 2"/>
-                                <div class="text-muted">Second new signup customer in the round-robin pool.</div>
-                                <div class="content-group mt16">
-                                    <field name="signup2_email" placeholder="signup2@example.com"/>
-                                    <field name="signup2_mail_server_id" options="{'no_create': True}"/>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-12 col-lg-6 o_setting_box">
-                            <div class="o_setting_left_pane"/>
-                            <div class="o_setting_right_pane">
-                                <label for="order1_email" string="Order 1"/>
-                                <div class="text-muted">First existing customer entering the purchase pool.</div>
-                                <div class="content-group mt16">
-                                    <field name="order1_email" placeholder="order1@example.com"/>
-                                    <field name="order1_mail_server_id" options="{'no_create': True}"/>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-12 col-lg-6 o_setting_box">
-                            <div class="o_setting_left_pane"/>
-                            <div class="o_setting_right_pane">
-                                <label for="order2_email" string="Order 2"/>
-                                <div class="text-muted">Second existing customer entering the purchase pool.</div>
-                                <div class="content-group mt16">
-                                    <field name="order2_email" placeholder="order2@example.com"/>
-                                    <field name="order2_mail_server_id" options="{'no_create': True}"/>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+            <xpath expr="//form" position="inside">
+                <app string="Customer Email Sender Pools" name="odoo_email_rate_limit" data-key="odoo_email_rate_limit">
+                    <block title="Signup Sender Pool">
+                        <setting string="Signup 1" help="First new signup customer in the round-robin pool.">
+                            <field name="signup1_email" placeholder="signup1@example.com"/>
+                            <field name="signup1_mail_server_id" options="{'no_create': True}"/>
+                        </setting>
+                        <setting string="Signup 2" help="Second new signup customer in the round-robin pool.">
+                            <field name="signup2_email" placeholder="signup2@example.com"/>
+                            <field name="signup2_mail_server_id" options="{'no_create': True}"/>
+                        </setting>
+                    </block>
+                    <block title="Existing Customer / Order Sender Pool">
+                        <setting string="Order 1" help="First existing customer entering the purchase pool.">
+                            <field name="order1_email" placeholder="order1@example.com"/>
+                            <field name="order1_mail_server_id" options="{'no_create': True}"/>
+                        </setting>
+                        <setting string="Order 2" help="Second existing customer entering the purchase pool.">
+                            <field name="order2_email" placeholder="order2@example.com"/>
+                            <field name="order2_mail_server_id" options="{'no_create': True}"/>
+                        </setting>
+                    </block>
+                </app>
             </xpath>
         </field>
     </record>
