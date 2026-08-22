@@ -2,12 +2,13 @@ from odoo import models
 
 
 class EmailSenderPoolState:
-    """Round-robin state helper.
+    """Per-customer sender-pool allocation helper.
 
-    This is intentionally a plain Python helper, not an Odoo model. Keeping the
-    pool cursor in ir.config_parameter avoids registering an extra model during
-    registry construction and therefore keeps the addon compatible with the
-    Odoo 19 registry loader.
+    A customer consumes exactly one slot when first assigned a pool sender for
+    the day. Subsequent emails for that customer reuse the stored affinity and
+    do not advance the pool. The allocation cursor is persisted in the database
+    and protected by a transaction advisory lock so concurrent workers cannot
+    assign the same slot to two different customers.
     """
 
     def __init__(self, env):
@@ -21,19 +22,38 @@ class EmailSenderPoolState:
         if not servers or count <= 0:
             return []
 
-        # Serialize updates for each pool inside the current PostgreSQL
-        # transaction. pg_advisory_xact_lock is released automatically when the
-        # transaction ends.
         lock_key = 0x41524954525A + (1 if pool == "signup" else 2)
         self.env.cr.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
 
         ICP = self.env["ir.config_parameter"].sudo()
         key = f"odoo_email_rate_limit.sender_pool.{pool}.next_index"
+
+        # Read the cursor directly from SQL so another Odoo worker cannot give
+        # us a stale ir.config_parameter cache value.
+        self.env.cr.execute(
+            "SELECT value FROM ir_config_parameter WHERE key = %s FOR UPDATE",
+            (key,),
+        )
+        row = self.env.cr.fetchone()
         try:
-            index = int(ICP.get_param(key, "0")) % len(servers)
+            index = int(row[0]) % len(servers) if row and row[0] is not None else 0
         except (TypeError, ValueError):
             index = 0
 
         selected = [servers[(index + offset) % len(servers)] for offset in range(count)]
-        ICP.set_param(key, str((index + count) % len(servers)))
+        next_index = (index + count) % len(servers)
+
+        if row:
+            self.env.cr.execute(
+                "UPDATE ir_config_parameter SET value = %s WHERE key = %s",
+                (str(next_index), key),
+            )
+        else:
+            self.env.cr.execute(
+                "INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date) "
+                "VALUES (%s, %s, %s, %s, NOW(), NOW())",
+                (key, str(next_index), self.env.uid, self.env.uid),
+            )
+
+        ICP.invalidate_cache()
         return selected
