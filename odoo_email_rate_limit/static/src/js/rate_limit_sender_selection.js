@@ -11,14 +11,19 @@ export class RateLimitSenderSelectionField extends SelectionField {
     setup() {
         super.setup();
         this.orm = useService("orm");
-        this.rateLimitState = useState({ choices: null });
+        // SelectionField renders before onOpened can refresh the choices. Never
+        // expose null/undefined to the SelectMenu because its template calls
+        // Array.from() on the options collection.
+        this.rateLimitState = useState({ choices: [] });
     }
 
     get options() {
-        if (this.props.name === "rate_limit_sender" && this.rateLimitState.choices !== null) {
-            return this.rateLimitState.choices;
+        if (this.props.name === "rate_limit_sender") {
+            const choices = this.rateLimitState.choices;
+            return Array.isArray(choices) ? choices : [];
         }
-        return super.options;
+        const options = super.options;
+        return options ?? [];
     }
 
     async refreshRateLimitChoices() {
@@ -30,7 +35,7 @@ export class RateLimitSenderSelectionField extends SelectionField {
             "get_rate_limit_sender_selection",
             []
         );
-        this.rateLimitState.choices = choices;
+        this.rateLimitState.choices = Array.isArray(choices) ? choices : [];
     }
 
     async onSenderDropdownOpened() {
