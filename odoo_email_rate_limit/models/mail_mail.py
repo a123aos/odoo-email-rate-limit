@@ -15,98 +15,120 @@ class MailMail(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        """Resolve sender pool before creating mail.mail records.
+        """Resolve pool sender before mail.mail records are created.
 
-        The selected SMTP server, From and Reply-To are creation-time values.
-        This keeps the send/queue path read-only with respect to sender
-        selection and avoids a write for every queued mail immediately before
-        SMTP delivery.
+        The selected server, From and Reply-To are stored in the create vals.
+        The send/queue path therefore does not need a sender-selection write
+        for every mail immediately before SMTP delivery.
         """
         today = fields.Date.context_today(self)
         partner_cache = {}
-        selected_for_partner = {}
-        pending_affinity = {"signup": {}, "order": {}}
-        pool_indexes = {"signup": [], "order": []}
+        affinity_to_remember = {}
+        pending_by_pool = {"signup": [], "order": []}
 
-        # Resolve the target partner from the values without creating mail.mail.
+        # Resolve partners and preserve already-selected fixed servers.
         for vals in vals_list:
-            model = vals.get("model")
-            res_id = vals.get("res_id")
-            partner = self._partner_from_values(model, res_id, vals.get("recipient_ids"))
-            if partner:
-                partner_cache[id(vals)] = partner
+            partner = self._partner_from_values(
+                vals.get("model"), vals.get("res_id"), vals.get("recipient_ids")
+            )
+            partner_cache[id(vals)] = partner
 
-        # First pass: preserve existing same-day customer affinity.
-        for vals in vals_list:
-            partner = partner_cache.get(id(vals))
             server_id = vals.get("mail_server_id")
-            server = self.env["ir.mail_server"].browse(server_id).exists() if server_id else self.env["ir.mail_server"].browse()
+            server = (
+                self.env["ir.mail_server"].browse(server_id).exists()
+                if server_id
+                else self.env["ir.mail_server"].browse()
+            )
             if not server or server.sender_pool not in ("signup", "order"):
                 continue
 
             pool = server.sender_pool
+            # Signup templates use signup affinity. Order-pool customer mails
+            # use order affinity. Never let a signup sender satisfy an order
+            # mail or vice versa.
             if pool == "signup" or vals.get("model") in self._AFFINITY_MODELS:
                 remembered = self._remembered_customer_sender(partner, today, pool)
                 if remembered:
                     self._apply_sender_values(vals, remembered)
-                    selected_for_partner[(pool, partner.id)] = remembered
-                    pending_affinity[pool][partner.id] = remembered
+                    if partner:
+                        affinity_to_remember[(pool, partner.id)] = remembered
                 else:
-                    pool_indexes[pool].append(vals)
+                    pending_by_pool[pool].append(vals)
 
-        # Second pass: allocate all new pool mails in batch. The cursor is
-        # advanced once per pool instead of once per mail.
-        for pool, pending_vals in pool_indexes.items():
+        # Allocate new senders in batches. One pool cursor update covers the
+        # whole create() call instead of one cursor update per mail.
+        for pool, pending_vals in pending_by_pool.items():
             if not pending_vals:
                 continue
+
             servers = self.env["ir.mail_server"]._sender_pool_servers(pool)
             if not servers:
                 continue
 
-            # A customer gets one sender for the day. Reuse that sender for
-            # every mail in this create batch belonging to the same customer.
-            groups = []
-            group_seen = set()
+            groups = {}
             ungrouped = []
             for vals in pending_vals:
                 partner = partner_cache.get(id(vals))
                 if partner:
-                    key = partner.id
-                    if key not in group_seen:
-                        group_seen.add(key)
-                        groups.append((key, partner))
+                    groups.setdefault(partner.id, partner)
                 else:
                     ungrouped.append(vals)
 
-            required = len(groups) + len(ungrouped)
-            selected_servers = list(self.env["ir.mail_server"].browse())
-            if required:
-                selected_servers = list(
-                    self.env["ir.mail_server"]
-                    ._select_sender_servers(pool, required)
-                )
+            needed = len(groups) + len(ungrouped)
+            selected_servers = self.env["ir.mail_server"]._select_sender_servers(pool, needed)
+            selected_iter = iter(selected_servers)
+            assignment = {}
 
-            cursor = 0
-            for partner_id, partner in groups:
-                selected = pending_affinity[pool].get(partner_id)
+            for partner_id in groups:
+                selected = affinity_to_remember.get((pool, partner_id))
                 if not selected:
-                    selected = selected_servers[cursor]
-                    cursor += 1
-                    pending_affinity[pool][partner_id] = selected
-                    partner.sudo().write({
-                        "signup_sender_id" if pool == "signup" else "order_sender_id": selected.id,
-                        "signup_sender_date" if pool == "signup" else "order_sender_date": today,
-                    })
-                for vals in pending_vals:
-                    if partner_cache.get(id(vals)) and partner_cache[id(vals)].id == partner_id:
-                        self._apply_sender_values(vals, selected)
+                    try:
+                        selected = next(selected_iter)
+                    except StopIteration:
+                        break
+                    assignment[(pool, partner_id)] = selected
+                    affinity_to_remember[(pool, partner_id)] = selected
 
-            for vals in ungrouped:
-                selected = selected_servers[cursor]
-                cursor += 1
-                self._apply_sender_values(vals, selected)
+            for vals in pending_vals:
+                partner = partner_cache.get(id(vals))
+                if partner:
+                    selected = affinity_to_remember.get((pool, partner.id))
+                else:
+                    try:
+                        selected = next(selected_iter)
+                    except StopIteration:
+                        selected = False
+                if selected:
+                    self._apply_sender_values(vals, selected)
 
-        return super().create(vals_list)
+        # Create the mail records only after all sender decisions are final.
+        mails = super().create(vals_list)
+
+        # Persist customer affinity once per unique customer/pool, after the
+        # mail records have been created successfully. This is unrelated to
+        # mail sender writes and is deliberately not done in the send path.
+        partner_updates = {}
+        for (pool, partner_id), selected in affinity_to_remember.items():
+            if not selected:
+                continue
+            partner_updates[(pool, partner_id)] = selected
+
+        for (pool, partner_id), selected in partner_updates.items():
+            partner = self.env["res.partner"].browse(partner_id).exists()
+            if not partner:
+                continue
+            if pool == "signup":
+                partner.sudo().write({
+                    "signup_sender_id": selected.id,
+                    "signup_sender_date": today,
+                })
+            elif pool == "order":
+                partner.sudo().write({
+                    "order_sender_id": selected.id,
+                    "order_sender_date": today,
+                })
+
+        return mails
 
     @api.model
     def _partner_from_values(self, model, res_id, recipient_ids=None):
@@ -118,8 +140,8 @@ class MailMail(models.Model):
                     return partner.commercial_partner_id or partner
                 if model == "res.users" and record.partner_id:
                     return record.partner_id.commercial_partner_id or record.partner_id
+
         if recipient_ids:
-            # create() values may contain [(6, 0, ids)] or [(4, id)] commands.
             ids = []
             for command in recipient_ids:
                 if command[0] == 6:
@@ -129,6 +151,7 @@ class MailMail(models.Model):
             if ids:
                 partner = self.env["res.partner"].browse(ids[:1]).exists()
                 return partner.commercial_partner_id if partner else partner
+
         return self.env["res.partner"].browse()
 
     @staticmethod
@@ -136,10 +159,12 @@ class MailMail(models.Model):
         sender = (server.sender_email or server.smtp_user or "").strip()
         if not sender or "@" not in sender:
             return
+
         name, _address = parseaddr(vals.get("email_from") or "")
         if not name:
             name = server.name or ""
         email_from = formataddr((name, sender)) if name else sender
+
         vals["mail_server_id"] = server.id
         vals["email_from"] = email_from
         vals["reply_to"] = email_from
@@ -168,7 +193,7 @@ class MailMail(models.Model):
         return self.env["ir.mail_server"].browse()
 
     def _set_from_server_sender(self, server):
-        """Legacy helper retained for compatibility; no queue-time write path."""
+        """Legacy compatibility helper; normal creation no longer writes here."""
         self.ensure_one()
         sender = (server.sender_email or server.smtp_user or "").strip()
         if not sender or "@" not in sender:
@@ -184,20 +209,20 @@ class MailMail(models.Model):
             })
 
     def _sync_pool_sender_before_send(self):
-        """Compatibility hook; sender is already fixed during create()."""
+        """No-op compatibility hook: sender is fixed at create time."""
         return True
 
     def _apply_selected_sender(self, partner, today, selected):
-        """Compatibility helper for callers outside create()."""
+        """Compatibility helper for external callers; not used by create()."""
         if not selected:
             return
-        vals = {
-            "email_from": self.email_from,
-            "reply_to": self.reply_to,
-        }
+        vals = {"email_from": self.email_from, "reply_to": self.reply_to}
         self._apply_sender_values(vals, selected)
-        vals.pop("mail_server_id", None)
-        self.with_context(rate_limit_internal=True).write(vals)
+        self.with_context(rate_limit_internal=True).write({
+            "mail_server_id": selected.id,
+            "email_from": vals["email_from"],
+            "reply_to": vals["reply_to"],
+        })
         if partner:
             if selected.sender_pool == "signup":
                 partner.sudo().write({"signup_sender_id": selected.id, "signup_sender_date": today})
@@ -205,7 +230,7 @@ class MailMail(models.Model):
                 partner.sudo().write({"order_sender_id": selected.id, "order_sender_date": today})
 
     def _apply_sender_pool(self):
-        """Compatibility no-op; sender selection now happens in create()."""
+        """Compatibility no-op: sender selection now happens in create()."""
         return True
 
     def _rate_limit_recipients(self):
