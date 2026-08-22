@@ -14,7 +14,11 @@ class EmailSenderPoolState:
         self.env = env
 
     def select_server(self, pool, servers):
-        if not servers:
+        selected = self.select_servers(pool, servers, 1)
+        return selected[0] if selected else self.env["ir.mail_server"].browse()
+
+    def select_servers(self, pool, servers, count):
+        if not servers or count <= 0:
             return self.env["ir.mail_server"].browse()
 
         # Serialize updates for each pool inside the current PostgreSQL
@@ -30,6 +34,9 @@ class EmailSenderPoolState:
         except (TypeError, ValueError):
             index = 0
 
-        server = servers[index]
-        ICP.set_param(key, str((index + 1) % len(servers)))
-        return server
+        selected = self.env["ir.mail_server"].browse()
+        for offset in range(count):
+            selected |= servers[(index + offset) % len(servers)]
+
+        ICP.set_param(key, str((index + count) % len(servers)))
+        return selected
