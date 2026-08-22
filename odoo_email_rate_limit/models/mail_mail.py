@@ -26,39 +26,68 @@ class MailMail(models.Model):
         return self.recipient_ids[:1]
 
     def _apply_sender_pool(self):
+        """Resolve sender pools with one sender affinity per customer per UTC day.
+
+        A pool rotates only when a customer has no sender recorded for the
+        current day. Once selected, all emails using that pool for the same
+        customer on that day reuse the selected server.
+        """
         for mail in self:
             server = mail.mail_server_id
             if not server or server.sender_pool == "none":
                 continue
+
             partner = mail._target_partner()
             today = fields.Date.context_today(mail)
 
-            # Signup: always round-robin and remember the selected server for the partner.
             if server.sender_pool == "signup":
-                selected = self.env["ir.mail_server"]._select_sender_from_pool("signup")
-                if selected:
-                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
-                    if partner:
+                selected = False
+                if partner and partner.signup_sender_id and partner.signup_sender_date == today:
+                    remembered = partner.signup_sender_id
+                    if remembered.active and remembered.sender_pool == "signup":
+                        selected = remembered
+
+                if not selected:
+                    selected = self.env["ir.mail_server"]._select_sender_from_pool("signup")
+                    if selected and partner:
                         partner.sudo().write({
                             "signup_sender_id": selected.id,
                             "signup_sender_date": today,
                         })
+
+                if selected:
+                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
                 continue
 
-            # SO / Invoice: if the customer signed up today, reuse that exact sender.
             if server.sender_pool == "order":
-                if (
-                    partner
-                    and partner.signup_sender_id
-                    and partner.signup_sender_date == today
-                    and partner.signup_sender_id.active
-                    and partner.signup_sender_id.sender_pool == "signup"
-                ):
-                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": partner.signup_sender_id.id})
-                else:
+                selected = False
+
+                # If the customer signed up today, order/invoice mail uses the
+                # exact signup sender. This avoids consuming another sender's
+                # external-recipient quota for the same customer.
+                if partner and partner.signup_sender_id and partner.signup_sender_date == today:
+                    remembered = partner.signup_sender_id
+                    if remembered.active and remembered.sender_pool == "signup":
+                        selected = remembered
+
+                # Otherwise, reuse the customer's order sender for today.
+                if not selected and partner and partner.order_sender_id and partner.order_sender_date == today:
+                    remembered = partner.order_sender_id
+                    if remembered.active and remembered.sender_pool == "order":
+                        selected = remembered
+
+                # Only a genuinely new customer/day consumes one position in
+                # the order pool.
+                if not selected:
                     selected = self.env["ir.mail_server"]._select_sender_from_pool("order")
-                    if selected:
-                        mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
+                    if selected and partner:
+                        partner.sudo().write({
+                            "order_sender_id": selected.id,
+                            "order_sender_date": today,
+                        })
+
+                if selected:
+                    mail.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
 
     def _rate_limit_recipients(self):
         self.ensure_one()
