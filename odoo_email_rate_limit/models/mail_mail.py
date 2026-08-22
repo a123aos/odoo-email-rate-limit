@@ -6,8 +6,6 @@ from odoo import api, fields, models, tools
 class MailMail(models.Model):
     _inherit = "mail.mail"
 
-    # Customer sender affinity applies to the commercial/order communication
-    # chain, not to unrelated account/system mail (for example password reset).
     _AFFINITY_MODELS = {
         "sale.order",
         "account.move",
@@ -37,12 +35,10 @@ class MailMail(models.Model):
         return partner.commercial_partner_id if partner else partner
 
     def _is_customer_affinity_mail(self):
-        """Whether this mail belongs to the business sender-affinity chain."""
         self.ensure_one()
         return self.model in self._AFFINITY_MODELS
 
     def _remembered_customer_sender(self, partner, today):
-        """Return today's signup/order sender for a customer, if any."""
         if not partner:
             return self.env["ir.mail_server"].browse()
 
@@ -59,18 +55,30 @@ class MailMail(models.Model):
         return self.env["ir.mail_server"].browse()
 
     def _set_from_server_sender(self, server):
-        """Keep the template display name but use the selected server address."""
+        """Use the selected server's SMTP login as the actual From address.
+
+        The template's address is only a fallback. This method is deliberately
+        called both when the pool is selected and immediately before SMTP send,
+        because Odoo can rebuild/update mail.mail values after create().
+        """
         self.ensure_one()
-        sender = server.smtp_user
+        sender = (server.smtp_user or "").strip()
         if not sender:
             return
 
         name, _address = parseaddr(self.email_from or "")
         if not name:
             name = server.name or ""
-        self.with_context(rate_limit_internal=True).write({
-            "email_from": formataddr((name, sender)) if name else sender,
-        })
+        email_from = formataddr((name, sender)) if name else sender
+        if self.email_from != email_from:
+            self.with_context(rate_limit_internal=True).write({"email_from": email_from})
+
+    def _sync_pool_sender_before_send(self):
+        """Final guard: selected pool server always wins over template From."""
+        for mail in self:
+            server = mail.mail_server_id
+            if server and server.sender_pool in ("signup", "order"):
+                mail._set_from_server_sender(server)
 
     def _apply_selected_sender(self, partner, today, selected):
         if not selected:
@@ -78,8 +86,6 @@ class MailMail(models.Model):
         self.with_context(rate_limit_internal=True).write({"mail_server_id": selected.id})
         self._set_from_server_sender(selected)
 
-        # The sender affinity is stored on the customer so all subsequent
-        # eligible business emails today reuse exactly this server/address.
         if partner:
             if selected.sender_pool == "signup":
                 partner.sudo().write({
@@ -93,31 +99,16 @@ class MailMail(models.Model):
                 })
 
     def _apply_sender_pool(self):
-        """Resolve sender pools using Customer + day affinity.
-
-        Signup is the customer onboarding event: every new customer entering
-        the Signup Pool advances the Signup round-robin once and stores that
-        sender on the customer for the day. The signup message is commonly
-        generated from ``res.users``, so Signup must be handled even though
-        ``res.users`` is intentionally not part of the business-mail model
-        allowlist.
-
-        Order Pool works the same way for the first order of a customer. Once
-        either Signup or Order establishes the customer's sender for today,
-        eligible business emails reuse that sender for the rest of the day.
-
-        Unrelated account/system mail is deliberately excluded.
-        """
+        """Resolve Signup/Order pools using customer + day affinity."""
         for mail in self:
             partner = mail._target_partner()
             today = fields.Date.context_today(mail)
             server = mail.mail_server_id
 
-            # A Signup Pool template is itself the onboarding event. Do this
-            # before the business-model allowlist so res.users signup emails
-            # can actually enter the round-robin pool.
+            # Signup itself is the onboarding event, including templates whose
+            # originating model is res.users.
             if server and server.sender_pool == "signup":
-                remembered = mail._remembered_customer_sender(partner, today)
+                remembered = self._remembered_customer_sender(partner, today)
                 if remembered and remembered.sender_pool == "signup":
                     mail.with_context(rate_limit_internal=True).write({"mail_server_id": remembered.id})
                     mail._set_from_server_sender(remembered)
@@ -126,14 +117,13 @@ class MailMail(models.Model):
                     mail._apply_selected_sender(partner, today, selected)
                 continue
 
-            # From this point onward only business communication is eligible
-            # for Customer sender affinity. This intentionally excludes things
-            # such as password reset / account emails.
+            # Password reset and unrelated account/system mail must not inherit
+            # a customer's business sender.
             if not mail._is_customer_affinity_mail():
                 continue
 
-            # Existing customer affinity always wins over the current template
-            # selection for the rest of the day.
+            # A sender already assigned today wins regardless of the current
+            # business template's outgoing-server setting.
             remembered = mail._remembered_customer_sender(partner, today)
             if remembered:
                 mail.with_context(rate_limit_internal=True).write({"mail_server_id": remembered.id})
@@ -173,6 +163,9 @@ class MailMail(models.Model):
             else:
                 mail.write({"scheduled_date": next_at, "state": "outgoing"})
         if allowed:
+            # Odoo's send path can update mail fields between create() and SMTP
+            # delivery. Re-apply the selected pool sender at the final boundary.
+            allowed._sync_pool_sender_before_send()
             return super(MailMail, allowed).send(
                 auto_commit=auto_commit,
                 raise_exception=raise_exception,
@@ -181,7 +174,6 @@ class MailMail(models.Model):
         return True
 
     def send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
-        """Rate-limit every sending path, including manual Send Now."""
         return self._rate_limit_send(
             auto_commit=auto_commit,
             raise_exception=raise_exception,
