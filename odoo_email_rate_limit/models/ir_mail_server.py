@@ -16,6 +16,7 @@ class IrMailServer(models.Model):
     rate_limit_internal_domains = fields.Char(string="Internal Email Domains", default=lambda self: self.env.company.email.split("@", 1)[1].lower() if self.env.company.email and "@" in self.env.company.email else "", help="Comma-separated domains treated as internal.")
     sender_pool = fields.Selection([("none", "Fixed / No Pool"), ("signup", "Signup (Welcome)"), ("order", "Order (SO / Invoice)")], string="Sender Pool", default="none", required=True, help="Servers in the same pool are selected round-robin.")
     sender_pool_sequence = fields.Integer(string="Pool Sequence", default=10)
+    sender_email = fields.Char(string="Sender Address", help="Actual From address used when this server is selected by a sender pool. If empty, an email-formatted SMTP username is used as a compatibility fallback.")
     fallback_enabled = fields.Boolean(string="Enable Fallback")
     fallback_server_id = fields.Many2one("ir.mail_server", string="Fallback Mail Server", domain="[('id', '!=', id)]")
     rate_limit_retry_delay = fields.Integer(string="Rate-limit Retry Delay (seconds)", default=60)
