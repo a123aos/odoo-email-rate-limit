@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from odoo import api, models
 
 
@@ -12,5 +14,8 @@ class ResUsers(models.Model):
         user = super()._signup_create_user(values)
         partner = user.partner_id
         if is_new_external_signup and partner and not partner.email_sender_pool:
-            partner.email_sender_pool = self.env['mail.mail']._allocate_sender_pool('signup')
+            partner.sudo().write({
+                'email_sender_pool': self.env['mail.mail']._allocate_sender_pool('signup'),
+                'email_sender_pool_date': datetime.now(timezone.utc).date(),
+            })
         return user
