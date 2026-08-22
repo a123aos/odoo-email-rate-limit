@@ -4,15 +4,32 @@ from odoo import models
 class EmailSenderPoolState:
     """Per-customer sender-pool allocation helper.
 
-    A customer consumes exactly one slot when first assigned a pool sender for
-    the day. Subsequent emails for that customer reuse the stored affinity and
-    do not advance the pool. The allocation cursor is persisted in the database
-    and protected by a transaction advisory lock so concurrent workers cannot
-    assign the same slot to two different customers.
+    The cursor is advanced once for each new customer allocation, never for
+    each email. A dedicated ir.sequence is used per pool so the round-robin
+    position is persisted independently of the mail record being created.
     """
 
     def __init__(self, env):
         self.env = env
+
+    def _sequence_code(self, pool):
+        return f"odoo_email_rate_limit.sender_pool.{pool}"
+
+    def _get_or_create_sequence(self, pool, size):
+        Sequence = self.env["ir.sequence"].sudo()
+        code = self._sequence_code(pool)
+        sequence = Sequence.search([("code", "=", code)], limit=1)
+        if not sequence:
+            sequence = Sequence.create({
+                "name": f"Email Sender Pool: {pool}",
+                "code": code,
+                "implementation": "standard",
+                "prefix": "",
+                "padding": 1,
+                "number_increment": 1,
+                "number_next": 1,
+            })
+        return sequence
 
     def select_server(self, pool, servers):
         selected = self.select_servers(pool, servers, 1)
@@ -22,38 +39,13 @@ class EmailSenderPoolState:
         if not servers or count <= 0:
             return []
 
-        lock_key = 0x41524954525A + (1 if pool == "signup" else 2)
-        self.env.cr.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
-
-        ICP = self.env["ir.config_parameter"].sudo()
-        key = f"odoo_email_rate_limit.sender_pool.{pool}.next_index"
-
-        # Read the cursor directly from SQL so another Odoo worker cannot give
-        # us a stale ir.config_parameter cache value.
-        self.env.cr.execute(
-            "SELECT value FROM ir_config_parameter WHERE key = %s FOR UPDATE",
-            (key,),
-        )
-        row = self.env.cr.fetchone()
-        try:
-            index = int(row[0]) % len(servers) if row and row[0] is not None else 0
-        except (TypeError, ValueError):
-            index = 0
-
-        selected = [servers[(index + offset) % len(servers)] for offset in range(count)]
-        next_index = (index + count) % len(servers)
-
-        if row:
-            self.env.cr.execute(
-                "UPDATE ir_config_parameter SET value = %s WHERE key = %s",
-                (str(next_index), key),
-            )
-        else:
-            self.env.cr.execute(
-                "INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date) "
-                "VALUES (%s, %s, %s, %s, NOW(), NOW())",
-                (key, str(next_index), self.env.uid, self.env.uid),
-            )
-
-        ICP.invalidate_cache()
+        # One sequence number is consumed per customer allocation. The caller
+        # groups emails by customer, so count here is the number of distinct
+        # customers, not the number of emails.
+        sequence = self._get_or_create_sequence(pool, len(servers))
+        selected = []
+        for _index in range(count):
+            number = sequence.next_by_id()
+            position = (int(number) - 1) % len(servers)
+            selected.append(servers[position])
         return selected
