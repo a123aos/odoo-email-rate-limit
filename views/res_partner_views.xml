@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_partner_form_email_sender_pool" model="ir.ui.view">
+        <field name="name">res.partner.form.email.sender.pool</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='email']" position="after">
+                <field name="email_sender_pool" groups="base.group_system"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
