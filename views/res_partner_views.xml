@@ -6,7 +6,8 @@
         <field name="inherit_id" ref="base.view_partner_form"/>
         <field name="arch" type="xml">
             <xpath expr="//field[@name='email']" position="after">
-                <field name="email_sender_pool" groups="base.group_system"/>
+                <field name="email_sender_server_id" groups="base.group_system"/>
+                <field name="email_sender_pool_date" groups="base.group_system"/>
             </xpath>
         </field>
     </record>
