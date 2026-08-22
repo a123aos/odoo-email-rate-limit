@@ -1,10 +1,7 @@
 import hashlib
-import logging
 from datetime import datetime, timezone
 
 from odoo import api, models
-
-_logger = logging.getLogger(__name__)
 
 
 class MailMail(models.Model):
@@ -16,7 +13,6 @@ class MailMail(models.Model):
 
     @api.model
     def _allocate_sender_pool(self, pool_type):
-        """Return the next server in the requested pool, using UTC-day round robin."""
         if pool_type not in ('signup', 'order'):
             raise ValueError('Unknown sender pool type: %s' % pool_type)
         servers = self.env['ir.mail_server'].sudo().search(
@@ -46,20 +42,6 @@ class MailMail(models.Model):
 
     @api.model
     def _get_customer_partner(self, values):
-        recipient_ids = values.get('recipient_ids') or []
-        if recipient_ids:
-            ids = []
-            for command in recipient_ids:
-                if isinstance(command, (list, tuple)) and command:
-                    if command[0] == 6 and len(command) >= 3:
-                        ids.extend(command[2] or [])
-                    elif command[0] == 4 and len(command) >= 2:
-                        ids.append(command[1])
-            if ids:
-                partners = self.env['res.partner'].browse(ids).exists().sorted('id')
-                partners = partners.filtered(lambda p: p.email)
-                if partners:
-                    return partners[0]
         model = values.get('model')
         res_id = values.get('res_id')
         if model and res_id and model in self.env:
@@ -73,6 +55,19 @@ class MailMail(models.Model):
                     partner = record.partner_id
                     if partner and partner.email:
                         return partner
+
+        recipient_ids = values.get('recipient_ids') or []
+        ids = []
+        for command in recipient_ids:
+            if isinstance(command, (list, tuple)) and command:
+                if command[0] == 6 and len(command) >= 3:
+                    ids.extend(command[2] or [])
+                elif command[0] == 4 and len(command) >= 2:
+                    ids.append(command[1])
+        if ids:
+            partners = self.env['res.partner'].browse(ids).exists().filtered('email')
+            if partners:
+                return partners.sorted('id')[0]
         return self.env['res.partner']
 
     @api.model
@@ -95,41 +90,24 @@ class MailMail(models.Model):
             return values
 
         today = self._utc_date()
-        pool = partner.email_sender_pool if partner.email_sender_pool_date == today else False
-        if not pool:
+        server = partner.email_sender_server_id if partner.email_sender_pool_date == today else self.env['ir.mail_server']
+
+        if not server:
             if not self._is_order_flow_mail(values):
                 return values
-            pool = self._allocate_sender_pool('order')
+            server = self._allocate_sender_pool('order')
             partner.sudo().write({
-                'email_sender_pool': pool,
+                'email_sender_server_id': server.id,
                 'email_sender_pool_date': today,
             })
 
-        server = self.env['ir.mail_server'].sudo().search([
-            ('sender_pool', '=', 'signup' if pool == 'signup' else 'order'),
-            ('active', '=', True),
-        ], order='sequence,id', limit=1)
-        # The actual assigned server is stored separately below when a signup
-        # or order allocation occurs. Pool names on the partner identify the
-        # customer-day assignment; mail_mail creation must use the server
-        # selected for that assignment.
-        if server and not values.get('mail_server_id'):
-            # Deterministic customer-day server selection from partner id,
-            # while preserving the pool-level assignment across all emails.
-            servers = self.env['ir.mail_server'].sudo().search([
-                ('sender_pool', '=', 'signup' if pool == 'signup' else 'order'),
-                ('active', '=', True),
-            ], order='sequence,id')
-            if servers:
-                values['mail_server_id'] = servers[(partner.id - 1) % len(servers)].id
-                values['email_from'] = servers[(partner.id - 1) % len(servers)].smtp_user or values.get('email_from')
+        values['mail_server_id'] = server.id
+        if server.smtp_user:
+            values['email_from'] = server.smtp_user
         return values
 
     @api.model_create_multi
     def create(self, vals_list):
         for values in vals_list:
-            try:
-                self._apply_customer_sender_pool(values)
-            except Exception:
-                _logger.exception('Unable to apply customer email sender pool')
+            self._apply_customer_sender_pool(values)
         return super().create(vals_list)
