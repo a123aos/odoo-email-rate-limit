@@ -1,5 +1,3 @@
-import datetime
-
 from odoo import api, fields, models, tools
 
 
@@ -20,10 +18,15 @@ class MailMail(models.Model):
             if record:
                 partner = getattr(record, "partner_id", False)
                 if partner:
-                    return partner
+                    # Sender affinity is customer-level. Always normalize to
+                    # the commercial partner so SO/invoice/contact records for
+                    # the same customer share the same daily sender.
+                    return partner.commercial_partner_id or partner
                 if self.model == "res.users" and record.partner_id:
-                    return record.partner_id
-        return self.recipient_ids[:1]
+                    partner = record.partner_id
+                    return partner.commercial_partner_id or partner
+        partner = self.recipient_ids[:1]
+        return partner.commercial_partner_id if partner else partner
 
     def _apply_sender_pool(self):
         """Resolve sender pools with one sender affinity per customer per UTC day.
@@ -62,22 +65,21 @@ class MailMail(models.Model):
             if server.sender_pool == "order":
                 selected = False
 
-                # If the customer signed up today, order/invoice mail uses the
-                # exact signup sender. This avoids consuming another sender's
-                # external-recipient quota for the same customer.
+                # Signup and order/invoice mail for the same customer on the
+                # same UTC day share the exact signup sender when available.
                 if partner and partner.signup_sender_id and partner.signup_sender_date == today:
                     remembered = partner.signup_sender_id
                     if remembered.active and remembered.sender_pool == "signup":
                         selected = remembered
 
-                # Otherwise, reuse the customer's order sender for today.
+                # Otherwise, reuse this customer's order sender for today.
                 if not selected and partner and partner.order_sender_id and partner.order_sender_date == today:
                     remembered = partner.order_sender_id
                     if remembered.active and remembered.sender_pool == "order":
                         selected = remembered
 
-                # Only a genuinely new customer/day consumes one position in
-                # the order pool.
+                # Only a genuinely new customer/day consumes the next order
+                # pool position.
                 if not selected:
                     selected = self.env["ir.mail_server"]._select_sender_from_pool("order")
                     if selected and partner:
@@ -102,7 +104,6 @@ class MailMail(models.Model):
 
     def _rate_limit_send(self, auto_commit=False, raise_exception=False, post_send_callback=None):
         allowed = self.browse()
-        delayed = self.browse()
         for mail in self:
             server = mail.mail_server_id
             if not server or not server.rate_limit_enabled:
@@ -115,7 +116,6 @@ class MailMail(models.Model):
                 allowed |= mail
             else:
                 mail.write({"scheduled_date": next_at, "state": "outgoing"})
-                delayed |= mail
         if allowed:
             return super(MailMail, allowed).send(
                 auto_commit=auto_commit,
